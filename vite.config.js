@@ -1,0 +1,10 @@
+import { defineConfig } from 'vite';
+
+export default defineConfig({
+  server: {
+    port: 5180,
+    // Web Bluetooth requires a secure context (HTTPS) on real devices/phones.
+    // On localhost, Chrome treats it as secure automatically.
+    host: true,
+  },
+});
