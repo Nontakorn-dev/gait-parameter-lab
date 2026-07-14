@@ -23,7 +23,7 @@ const MIN_POST_HS_OFFSET_SECONDS = 0.04;
 const MIN_POST_HS_OFFSET_SAMPLES = Math.max(3, Math.round(MIN_POST_HS_OFFSET_SECONDS * SAMPLE_RATE));
 const PATIENT_EVENT_DETECTOR_OPTIONS = {
   sampleRate: SAMPLE_RATE,
-  maxStrideTime: 3.0,
+  maxStrideTime: 3.5,
   minStrideTime: 0.6,
   minHsSeparationSeconds: 0.55,
   toSearchStartPct: 0.20,
