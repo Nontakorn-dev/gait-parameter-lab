@@ -442,10 +442,13 @@ export class GaitProcessor {
     const dtSeconds = this.getSampleIntervalSeconds(timestampMs);
     const gyro = readGyroDps(sample, this.gyroBiasDps);
     const gx = gyro.gx;
+    const aXg = rawAccelToG(getRawAxis(sample, 'ax', 'raw_accel', 0));
     const aYg = rawAccelToG(getRawAxis(sample, 'ay', 'raw_accel', 1));
     const aZg = rawAccelToG(getRawAxis(sample, 'az', 'raw_accel', 2));
     const accelAngle = accelToAngle(aYg, aZg);
-    const shankAngle = this.kalman.update(gx, accelAngle, dtSeconds);
+    // ‖accel‖ (3 แกน) ใช้ gate ความเชื่อ accel: ใกล้ 1g = gravity ล้วน, เบี่ยงมาก = มี motion accel
+    const accelMagnitudeG = Math.sqrt(aXg * aXg + aYg * aYg + aZg * aZg);
+    const shankAngle = this.kalman.update(gx, accelAngle, dtSeconds, accelMagnitudeG);
 
     if (!this.sessionStartTime) {
       this.sessionStartTime = timestampMs;
