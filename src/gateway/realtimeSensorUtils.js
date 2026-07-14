@@ -3,6 +3,27 @@ function toFiniteNumber(value) {
   return Number.isFinite(numericValue) ? numericValue : null
 }
 
+// Canonical sensor frame ที่ downstream (gaitProcessor / gaitCalibration) คาดหวัง:
+//   gyro[0] (gx) = angular velocity ในระนาบ sagittal, เป็น + เมื่อแกว่งขาไปด้านหน้า
+//   accel[1],[2] (ay, az) = ระนาบ sagittal สำหรับประมาณมุม shank
+//
+// ค่า default เป็น identity (ถือว่าติดตั้งเซนเซอร์ตรงกรอบ canonical อยู่แล้ว ซึ่งดีที่สุด
+// เพราะไม่มีจุดพลาด). ถ้าจำเป็นต้อง mirror สองขาจากกล่องเดียวกัน ให้เติมค่าต่อข้างจาก
+// ผล swing test — แต่ละช่องคือ [sourceIndex, sign] เช่น gx ที่กลับด้านของขาซ้าย = [0, -1].
+// สำคัญ: หลังแก้ค่านี้ ต้องทำ calibration ใหม่ เพราะ gyro bias เดิมอยู่คนละกรอบ.
+const AXIS_MAP = {
+  R: { accel: [[0, 1], [1, 1], [2, 1]], gyro: [[0, 1], [1, 1], [2, 1]] },
+  L: { accel: [[0, 1], [1, 1], [2, 1]], gyro: [[0, 1], [1, 1], [2, 1]] },
+}
+
+export function applyAxisMap(accel, gyro, side, axisMap = AXIS_MAP) {
+  const map = axisMap[side] || axisMap.R
+  return {
+    accel: map.accel.map(([index, sign]) => accel[index] * sign),
+    gyro: map.gyro.map(([index, sign]) => gyro[index] * sign),
+  }
+}
+
 function inferSideFromText(value = '') {
   const normalizedValue = String(value || '').trim().toUpperCase()
 
@@ -120,11 +141,30 @@ export function normalizeRealtimeSensorSample(payload) {
     return null
   }
 
+  // Remap เป็น canonical frame ครั้งเดียว. normalizeRealtimeSensorSample ถูกเรียกซ้ำได้
+  // (BLE stream normalize หนึ่งครั้ง แล้ว _ingestSensorSample normalize อีกครั้ง) จึงกัน
+  // การ remap ซ้ำด้วย flag axisRemapped ไม่งั้น sign flip จะหักล้างกันเอง.
+  const alreadyRemapped = payload?.axisRemapped === true
+  const remapped = alreadyRemapped
+    ? { accel: [normalized.ax, normalized.ay, normalized.az], gyro: [normalized.gx, normalized.gy, normalized.gz] }
+    : applyAxisMap(
+      [normalized.ax, normalized.ay, normalized.az],
+      [normalized.gx, normalized.gy, normalized.gz],
+      normalized.side,
+    )
+
   return {
     ...normalized,
+    axisRemapped: true,
+    ax: remapped.accel[0],
+    ay: remapped.accel[1],
+    az: remapped.accel[2],
+    gx: remapped.gyro[0],
+    gy: remapped.gyro[1],
+    gz: remapped.gyro[2],
     timestampMs: normalized.timestamp_ms,
-    raw_accel: [normalized.ax, normalized.ay, normalized.az],
-    raw_gyro: [normalized.gx, normalized.gy, normalized.gz],
+    raw_accel: [remapped.accel[0], remapped.accel[1], remapped.accel[2]],
+    raw_gyro: [remapped.gyro[0], remapped.gyro[1], remapped.gyro[2]],
   }
 }
 
