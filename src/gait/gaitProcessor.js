@@ -10,9 +10,10 @@ const WINDOW_SAMPLES = SAMPLE_RATE * WINDOW_SECONDS;
 const G_MS2 = 9.81;
 const EPOCH_THRESHOLD_MS = 946684800000;
 const STANCE_ENTRY_ANGULAR_VELOCITY_ABS = 5;
-const STEP_LENGTH_MIN_M = 0.15;
-const STEP_LENGTH_MAX_M = 0.80;
-const STRIDE_LENGTH_MAX_M = STEP_LENGTH_MAX_M * 2;
+// การ integrate ความเร่งตลอด HS→HS ของขาเดียวกัน = ระยะ 1 stride โดยตรง
+// step = stride/2 (ประมาณ เพราะเซนเซอร์ข้างเดียววัด step ของขาตรงข้ามไม่ได้)
+const STRIDE_LENGTH_MIN_M = 0.30;
+const STRIDE_LENGTH_MAX_M = 1.80;
 const STANCE_ENTRY_THRESHOLD_MIN = 3;
 const STANCE_ENTRY_THRESHOLD_MAX = 12;
 const STANCE_ENTRY_VALLEY_THRESHOLD_MAX = 40;
@@ -386,7 +387,6 @@ export class GaitProcessor {
     this.totalStepCount = 0;
     this.totalStrideCount = 0;
     this.countedCycleStartSampleIds = new Set();
-    this.previousStepLength = null;
     this.nextSampleId = 1;
     this.sessionStartTime = null;
     this.latestSampleTimestampMs = null;
@@ -509,7 +509,6 @@ export class GaitProcessor {
     const peakAngles = [];
     const clearances = [];
     const integrationWindows = [];
-    let rollingPreviousStepLength = this.previousStepLength;
 
     for (const cycle of cycles) {
       // นับทุก cycle ที่ยังไม่เคยนับ (ไม่ใช่แค่ cycle สุดท้าย) เพื่อไม่ให้พลาด
@@ -558,7 +557,7 @@ export class GaitProcessor {
         ? (timestamps[metricEndIdx] - timestamps[metricStartIdx]) / segmentSampleSpan
         : (1.0 / SAMPLE_RATE);
 
-      const { strideLength: integratedStepLength, clearance } = this.velocityIntegrator.computeStrideMetrics(
+      const { strideLength: integratedStrideLength, clearance } = this.velocityIntegrator.computeStrideMetrics(
         cycleAy,
         cycleAz,
         cycleAngles,
@@ -569,25 +568,15 @@ export class GaitProcessor {
         },
       );
 
-      const stepLength = Math.max(
-        STEP_LENGTH_MIN_M,
-        Math.min(STEP_LENGTH_MAX_M, integratedStepLength),
+      const strideLength = Math.max(
+        STRIDE_LENGTH_MIN_M,
+        Math.min(STRIDE_LENGTH_MAX_M, integratedStrideLength),
       );
-      const strideLength = Number.isFinite(rollingPreviousStepLength)
-        ? Math.max(
-          STEP_LENGTH_MIN_M * 2,
-          Math.min(STRIDE_LENGTH_MAX_M, rollingPreviousStepLength + stepLength),
-        )
-        : null;
+      const stepLength = strideLength / 2;
 
       stepLengths.push(stepLength);
       strideLengths.push(strideLength);
-      rollingPreviousStepLength = stepLength;
       clearances.push(Math.max(0, Math.min(0.3, clearance)));
-    }
-
-    if (cycles.length > 0) {
-      this.previousStepLength = rollingPreviousStepLength;
     }
 
     if (cycles.length === 0) {
@@ -637,12 +626,8 @@ export class GaitProcessor {
     const cadence = strideTimeLast > 0 ? (2 / strideTimeLast) * 60 : 0;
     const stepLength = stepLengthLast;
     const stepTime = strideTimeLast / 2;
-    const walkingSpeed = strideTimeLast > 0
-      ? (
-        Number.isFinite(strideLengthLast)
-          ? strideLengthLast / strideTimeLast
-          : stepLengthLast / stepTime
-      )
+    const walkingSpeed = strideTimeLast > 0 && Number.isFinite(strideLengthLast)
+      ? strideLengthLast / strideTimeLast
       : 0;
     const doubleSupportPct = Number.isFinite(stancePctLast)
       ? Math.max(0, 2 * stancePctLast - 100)
@@ -716,7 +701,6 @@ export class GaitProcessor {
     this.totalStepCount = 0;
     this.totalStrideCount = 0;
     this.countedCycleStartSampleIds = new Set();
-    this.previousStepLength = null;
     this.nextSampleId = 1;
     this.sessionStartTime = null;
     this.latestSampleTimestampMs = null;
