@@ -12,8 +12,8 @@ export class VelocityIntegrator {
     const cosT = Math.cos(theta);
     const sinT = Math.sin(theta);
 
-    const aVert = -ay * cosT + az * sinT;
-    const aHoriz = -ay * sinT - az * cosT;
+    const aVert = -ay * cosT - az * sinT;
+    const aHoriz = -ay * sinT + az * cosT;
 
     return { aVert, aHoriz };
   }

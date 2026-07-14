@@ -23,9 +23,9 @@ const MIN_POST_HS_OFFSET_SECONDS = 0.04;
 const MIN_POST_HS_OFFSET_SAMPLES = Math.max(3, Math.round(MIN_POST_HS_OFFSET_SECONDS * SAMPLE_RATE));
 const PATIENT_EVENT_DETECTOR_OPTIONS = {
   sampleRate: SAMPLE_RATE,
-  maxStrideTime: 4.0,
-  minStrideTime: 1.0,
-  minHsSeparationSeconds: 1.0,
+  maxStrideTime: 3.0,
+  minStrideTime: 0.6,
+  minHsSeparationSeconds: 0.55,
   toSearchStartPct: 0.20,
   toSearchEndPct: 0.80,
   hsProminence: 45,
@@ -600,7 +600,8 @@ export class GaitProcessor {
       cycleStartSampleId !== null
       && cycleStartSampleId !== this.lastCountedCycleStartSampleId
     ) {
-      this.totalStepCount += 1;
+      // 1 gait cycle (HS→HS ขาเดียวกัน) = 1 stride = 2 steps
+      this.totalStepCount += 2;
       this.lastCountedCycleStartSampleId = cycleStartSampleId;
     }
 
