@@ -385,7 +385,7 @@ export class GaitProcessor {
     this.latestParams = null;
     this.totalStepCount = 0;
     this.totalStrideCount = 0;
-    this.lastCountedCycleStartSampleId = null;
+    this.countedCycleStartSampleIds = new Set();
     this.previousStepLength = null;
     this.nextSampleId = 1;
     this.sessionStartTime = null;
@@ -509,6 +509,17 @@ export class GaitProcessor {
     let rollingPreviousStepLength = this.previousStepLength;
 
     for (const cycle of cycles) {
+      // นับทุก cycle ที่ยังไม่เคยนับ (ไม่ใช่แค่ cycle สุดท้าย) เพื่อไม่ให้พลาด
+      // cycle ที่มีอยู่ใน buffer ตั้งแต่ analyze() ครั้งแรก 1 cycle = 1 stride = 2 steps
+      const countableCycleStartSampleId = samples[cycle.hsStart.index]?.sampleId ?? null;
+      if (
+        countableCycleStartSampleId !== null
+        && !this.countedCycleStartSampleIds.has(countableCycleStartSampleId)
+      ) {
+        this.countedCycleStartSampleIds.add(countableCycleStartSampleId);
+        this.totalStepCount += 2;
+      }
+
       const integrationWindow = findStepIntegrationWindow(smoothedAngVel, timestamps, cycle);
       const metricStartIdx = integrationWindow.startIdx;
       const metricEndIdx = integrationWindow.endIdx;
@@ -596,13 +607,14 @@ export class GaitProcessor {
     const cycleStartSampleId = cycleStartSample?.sampleId ?? null;
     const cycleStartTimestampMs = cycleStartSample?.timestampMs ?? null;
 
-    if (
-      cycleStartSampleId !== null
-      && cycleStartSampleId !== this.lastCountedCycleStartSampleId
-    ) {
-      // 1 gait cycle (HS→HS ขาเดียวกัน) = 1 stride = 2 steps
-      this.totalStepCount += 2;
-      this.lastCountedCycleStartSampleId = cycleStartSampleId;
+    // ตัด id ของ cycle ที่เลื่อนออกจาก buffer แล้วทิ้ง (ตรวจซ้ำไม่ได้อีก) เพื่อไม่ให้ Set โตไม่จำกัด
+    const oldestBufferedSampleId = samples[0]?.sampleId ?? null;
+    if (Number.isFinite(oldestBufferedSampleId)) {
+      for (const countedId of this.countedCycleStartSampleIds) {
+        if (countedId < oldestBufferedSampleId) {
+          this.countedCycleStartSampleIds.delete(countedId);
+        }
+      }
     }
 
     this.totalStrideCount = Math.floor(this.totalStepCount / 2);
@@ -692,7 +704,7 @@ export class GaitProcessor {
     this.latestParams = null;
     this.totalStepCount = 0;
     this.totalStrideCount = 0;
-    this.lastCountedCycleStartSampleId = null;
+    this.countedCycleStartSampleIds = new Set();
     this.previousStepLength = null;
     this.nextSampleId = 1;
     this.sessionStartTime = null;
