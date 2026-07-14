@@ -6,6 +6,9 @@ import {
   normalizeRealtimeSensorSample,
 } from './realtimeSensorUtils.js';
 
+// applyAxisMap ถูกเรียกที่ transport decode boundary ที่เดียว (realtimeTransport.js)
+// เทสต์เหล่านี้ล็อก: (ก) กลไก remap ถูกต้อง, (ข) normalize เป็น pass-through ไม่ remap ซ้ำ
+
 test('applyAxisMap เรียงแกนใหม่และกลับเครื่องหมายตาม [sourceIndex, sign]', () => {
   // map: gx = -source[2], gy = source[0], gz = source[1]; accel identity
   const axisMap = {
@@ -23,18 +26,18 @@ test('applyAxisMap fallback ไปใช้ R เมื่อ side ไม่ร�
   assert.equal(accel[0], -5);
 });
 
-function makePayload(side) {
+function makePayload(side, accel = [100, 200, 300], gyro = [11, 22, 33]) {
   return {
     sensor_key: side === 'L' ? 'DernDee_L_Shank' : 'DernDee_R_Shank',
     side,
     sensor_mount: 'shank',
-    raw_accel: [100, 200, 300],
-    raw_gyro: [11, 22, 33],
+    raw_accel: accel,
+    raw_gyro: gyro,
     timestamp_ms: 1234,
   };
 }
 
-test('normalize (identity map ปัจจุบัน) ส่งค่าผ่านครบทั้งซ้ายและขวา', () => {
+test('normalize เป็น pass-through ล้วน — ไม่แตะแกน (remap ทำที่ transport แล้ว)', () => {
   for (const side of ['L', 'R']) {
     const out = normalizeRealtimeSensorSample(makePayload(side));
     assert.equal(out.side, side);
@@ -45,13 +48,25 @@ test('normalize (identity map ปัจจุบัน) ส่งค่าผ่
   }
 });
 
-test('normalize เป็น idempotent — normalize ซ้ำไม่ remap ซ้ำ (กัน sign flip หักล้าง)', () => {
-  for (const side of ['L', 'R']) {
-    const once = normalizeRealtimeSensorSample(makePayload(side));
-    assert.equal(once.axisRemapped, true);
-    const twice = normalizeRealtimeSensorSample(once);
-    assert.deepEqual(twice.raw_accel, once.raw_accel);
-    assert.deepEqual(twice.raw_gyro, once.raw_gyro);
-    assert.equal(twice.gx, once.gx);
-  }
+test('remap-once invariant: normalize ซ้ำหลัง boundary ไม่ flip ซ้ำ (แม้ map เป็น non-identity)', () => {
+  // จำลอง transport boundary ด้วย flip map ที่ไม่ใช่ identity
+  const flipMap = { L: { accel: [[0, 1], [1, 1], [2, 1]], gyro: [[0, -1], [1, 1], [2, 1]] } };
+  const rawAccel = [100, 200, 300];
+  const rawGyro = [11, 22, 33];
+  const canonical = applyAxisMap(rawAccel, rawGyro, 'L', flipMap);
+  assert.equal(canonical.gyro[0], -11, 'gx ควรถูก flip ที่ boundary');
+
+  // ข้อมูลบนสายเป็น canonical แล้ว — normalize กี่ครั้งก็ต้องคงค่าเดิม
+  const once = normalizeRealtimeSensorSample(makePayload('L', canonical.accel, canonical.gyro));
+  const twice = normalizeRealtimeSensorSample(once);
+  assert.deepEqual(twice.raw_gyro, canonical.gyro);
+  assert.deepEqual(twice.raw_accel, canonical.accel);
+  assert.equal(twice.gx, -11, 'normalize ต้องไม่ flip ซ้ำ');
+});
+
+test('concern#2: demo-style canonical sample (side R) ผ่าน normalize ไม่ถูก transform', () => {
+  // demo bypass transport จึงไม่เคยถูก remap — normalize ต้องไม่แตะ แม้ AXIS_MAP.R จะ non-identity
+  const out = normalizeRealtimeSensorSample(makePayload('R', [1, 2, 3], [4, 5, 6]));
+  assert.deepEqual(out.raw_accel, [1, 2, 3]);
+  assert.deepEqual(out.raw_gyro, [4, 5, 6]);
 });

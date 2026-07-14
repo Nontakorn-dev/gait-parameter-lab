@@ -7,6 +7,11 @@ function toFiniteNumber(value) {
 //   gyro[0] (gx) = angular velocity ในระนาบ sagittal, เป็น + เมื่อแกว่งขาไปด้านหน้า
 //   accel[1],[2] (ay, az) = ระนาบ sagittal สำหรับประมาณมุม shank
 //
+// applyAxisMap ถูกเรียก "ครั้งเดียว" ที่ transport decode boundary (realtimeTransport.js
+// notificationHandler) ซึ่งเป็นที่เดียวที่มี raw sensor frame จริง หลังจุดนั้นข้อมูลเป็น
+// canonical เสมอ (normalize เป็นเพียง pass-through ไม่ remap ซ้ำ) จึงไม่ต้องพึ่ง flag
+// ข้าม serialization hop และ demo/remote-broadcast ก็ไม่ถูก transform ผิด.
+//
 // ค่า default เป็น identity (ถือว่าติดตั้งเซนเซอร์ตรงกรอบ canonical อยู่แล้ว ซึ่งดีที่สุด
 // เพราะไม่มีจุดพลาด). ถ้าจำเป็นต้อง mirror สองขาจากกล่องเดียวกัน ให้เติมค่าต่อข้างจาก
 // ผล swing test — แต่ละช่องคือ [sourceIndex, sign] เช่น gx ที่กลับด้านของขาซ้าย = [0, -1].
@@ -141,30 +146,13 @@ export function normalizeRealtimeSensorSample(payload) {
     return null
   }
 
-  // Remap เป็น canonical frame ครั้งเดียว. normalizeRealtimeSensorSample ถูกเรียกซ้ำได้
-  // (BLE stream normalize หนึ่งครั้ง แล้ว _ingestSensorSample normalize อีกครั้ง) จึงกัน
-  // การ remap ซ้ำด้วย flag axisRemapped ไม่งั้น sign flip จะหักล้างกันเอง.
-  const alreadyRemapped = payload?.axisRemapped === true
-  const remapped = alreadyRemapped
-    ? { accel: [normalized.ax, normalized.ay, normalized.az], gyro: [normalized.gx, normalized.gy, normalized.gz] }
-    : applyAxisMap(
-      [normalized.ax, normalized.ay, normalized.az],
-      [normalized.gx, normalized.gy, normalized.gz],
-      normalized.side,
-    )
-
+  // Pass-through เท่านั้น: axis remap ทำแล้วที่ transport decode boundary (ดู applyAxisMap).
+  // ข้อมูลที่เข้ามาที่นี่เป็น canonical frame แล้วเสมอ.
   return {
     ...normalized,
-    axisRemapped: true,
-    ax: remapped.accel[0],
-    ay: remapped.accel[1],
-    az: remapped.accel[2],
-    gx: remapped.gyro[0],
-    gy: remapped.gyro[1],
-    gz: remapped.gyro[2],
     timestampMs: normalized.timestamp_ms,
-    raw_accel: [remapped.accel[0], remapped.accel[1], remapped.accel[2]],
-    raw_gyro: [remapped.gyro[0], remapped.gyro[1], remapped.gyro[2]],
+    raw_accel: [normalized.ax, normalized.ay, normalized.az],
+    raw_gyro: [normalized.gx, normalized.gy, normalized.gz],
   }
 }
 

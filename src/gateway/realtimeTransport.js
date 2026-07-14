@@ -1,3 +1,5 @@
+import { applyAxisMap } from './realtimeSensorUtils.js'
+
 const TRANSPORT_MODE_STORAGE_KEY = 'derndee:realtime-transport-mode'
 const DEVICE_ASSIGNMENTS_STORAGE_KEY = 'derndee:browser-ble-assignments'
 const TRANSPORT_MODE_WEB_BLUETOOTH = 'web-bluetooth'
@@ -594,16 +596,24 @@ class BrowserBleManager {
           lastPacketSize: packetBytes.byteLength,
         }))
 
+        // Remap raw sensor frame -> canonical frame ที่นี่ที่เดียว (จุดเดียวที่มี raw
+        // hardware frame). ทุก hop หลังจากนี้ (normalize, calibration, processor,
+        // broadcast) ถือว่าข้อมูลเป็น canonical แล้ว จึงไม่ต้องพึ่ง flag ข้าม serialization
+        // และ remote-broadcast ก็รับ canonical โดยไม่ remap ซ้ำ
+        const senderName = bluetoothDevice.name || target.expectedDeviceId
+        const side = inferSide(senderName, positionId)
+        const canonical = applyAxisMap(decoded.raw_accel, decoded.raw_gyro, side)
+
         this.broadcast({
           type: 'DATA',
           payload: {
-            name: bluetoothDevice.name || target.expectedDeviceId,
+            name: senderName,
             position_id: positionId,
-            side: inferSide(bluetoothDevice.name || target.expectedDeviceId, positionId),
-            sensor_mount: inferSensorMount(bluetoothDevice.name || target.expectedDeviceId, positionId),
+            side,
+            sensor_mount: inferSensorMount(senderName, positionId),
             timestamp_ms: decoded.timestamp_ms,
-            raw_accel: decoded.raw_accel,
-            raw_gyro: decoded.raw_gyro,
+            raw_accel: canonical.accel,
+            raw_gyro: canonical.gyro,
             seq: decoded.seq,
           },
         })
