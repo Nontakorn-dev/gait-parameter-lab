@@ -548,6 +548,13 @@ export class GaitProcessor {
         cycleAngles.push(shankAngle[j]);
       }
 
+      // dt จริงเฉลี่ยของ window จาก timestamp (วินาที) เพื่อให้ double integration
+      // ทนต่อ dropped sample เท่ากับ temporal metrics; fallback เป็น nominal ถ้า timestamp ใช้ไม่ได้
+      const segmentSampleSpan = Math.max(1, metricEndIdx - metricStartIdx);
+      const winDt = Number.isFinite(timestamps[metricEndIdx]) && Number.isFinite(timestamps[metricStartIdx])
+        ? (timestamps[metricEndIdx] - timestamps[metricStartIdx]) / segmentSampleSpan
+        : (1.0 / SAMPLE_RATE);
+
       const { strideLength: integratedStepLength, clearance } = this.velocityIntegrator.computeStrideMetrics(
         cycleAy,
         cycleAz,
@@ -555,6 +562,7 @@ export class GaitProcessor {
         {
           integrationStartIdx: localIntegrationStartIdx,
           integrationEndIdx: localIntegrationEndIdx,
+          dt: winDt,
         },
       );
 

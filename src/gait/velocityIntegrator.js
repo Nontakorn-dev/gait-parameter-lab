@@ -19,6 +19,8 @@ export class VelocityIntegrator {
   }
 
   computeStrideMetrics(ayArray, azArray, angles, options = {}) {
+    // ใช้ dt จริงจาก timestamp เมื่อส่งมา (ทนต่อ dropped sample) ไม่งั้น fallback เป็น nominal
+    const dt = Number.isFinite(options.dt) && options.dt > 0 ? options.dt : this.dt;
     const sampleCount = ayArray.length;
     if (sampleCount < 2) {
       return {
@@ -61,13 +63,13 @@ export class VelocityIntegrator {
       };
     }
 
-    let velocity = trapezoidalIntegrate(swingHoriz, this.dt);
+    let velocity = trapezoidalIntegrate(swingHoriz, dt);
     velocity = this.correctDrift(velocity);
-    const displacement = trapezoidalIntegrate(velocity, this.dt);
+    const displacement = trapezoidalIntegrate(velocity, dt);
 
-    let verticalVelocity = trapezoidalIntegrate(swingVert, this.dt);
+    let verticalVelocity = trapezoidalIntegrate(swingVert, dt);
     verticalVelocity = this.correctDrift(verticalVelocity);
-    const verticalDisplacement = trapezoidalIntegrate(verticalVelocity, this.dt);
+    const verticalDisplacement = trapezoidalIntegrate(verticalVelocity, dt);
 
     let minVertical = Infinity;
     let maxVertical = -Infinity;
