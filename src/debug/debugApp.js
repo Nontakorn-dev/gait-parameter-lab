@@ -36,6 +36,33 @@ export function detectSagittalAxis(peakAbs = {}) {
   return { axis, value: value === -Infinity ? 0 : value, isCorrect: axis === 'gx' };
 }
 
+// ท่าที่ 0 (ยืนนิ่ง หน้าแข้งตั้งตรง): gravity ต้องอยู่ที่ ay ≈ −1.00g (แกนตามยาว)
+// ถ้า az อ่านได้ ~1g แทน = แกน accel สลับ → accelToAngle/sensorToWorld ผิดทันที
+export function detectGravityAxis(values = {}) {
+  let axis = 'ay';
+  let magnitude = -Infinity;
+  for (const candidate of ACCEL_AXES) {
+    const abs = Math.abs(values[candidate] ?? 0);
+    if (abs > magnitude) {
+      magnitude = abs;
+      axis = candidate;
+    }
+  }
+  const value = values[axis] ?? 0;
+  const nearOneG = magnitude >= 0.85 && magnitude <= 1.15;
+
+  if (!nearOneG) {
+    return { axis, value, state: 'pending', message: 'ยืนนิ่งให้หน้าแข้งตั้งตรง (รอ gravity นิ่งที่ ~1g)' };
+  }
+  if (axis !== 'ay') {
+    return { axis, value, state: 'bad', message: `แกน accel สลับ: gravity อยู่ที่ ${axis} (ควรเป็น ay) → ต้อง remap` };
+  }
+  if (value > 0) {
+    return { axis, value, state: 'bad', message: 'ay = +1g (กลับหัว/sign) → ต้อง flip' };
+  }
+  return { axis, value, state: 'ok', message: `ay ≈ ${value.toFixed(2)}g ✅` };
+}
+
 // |ค่า| peak ต่อแกนจาก peak บวก/ลบ (ใช้หาแกน sagittal)
 export function peakAbsFrom(peakPos = {}, peakNeg = {}) {
   const out = {};
@@ -111,12 +138,14 @@ export class DebugApp {
     this.demoStream = null;
     this.renderTimer = null;
     this.traceRecorder = new TraceRecorder({ sampleRateHzNominal: 100 });
+    this.connectedCount = 0;
     this.els = {};
   }
 
   init() {
     this.els = {
       status: document.getElementById('debug-status'),
+      warning: document.getElementById('debug-warning'),
       sensors: document.getElementById('debug-sensors'),
       verdict: document.getElementById('debug-verdict'),
       record: document.getElementById('debug-record'),
@@ -158,6 +187,7 @@ export class DebugApp {
         console.warn(`Connect ${slot} failed:`, error);
       }
     }
+    this.connectedCount = connected;
     this._setStatus(connected ? `Connected ${connected} sensor(s). Start swinging.` : 'No sensor connected.');
   }
 
@@ -260,6 +290,8 @@ export class DebugApp {
       return;
     }
 
+    this._renderConnectionWarning();
+
     const trackers = Array.from(this.trackers.values())
       .sort((a, b) => (a.side === 'L' ? 0 : 1) - (b.side === 'L' ? 0 : 1));
 
@@ -276,6 +308,7 @@ export class DebugApp {
   _renderSensor(tracker) {
     const peakAbs = peakAbsFrom(tracker.peakPos, tracker.peakNeg);
     const sagittal = detectSagittalAxis(peakAbs);
+    const gravity = detectGravityAxis(tracker.latest);
     const row = (axis, unit) => {
       const value = tracker.latest[axis];
       const isSagittal = axis === sagittal.axis && GYRO_AXES.includes(axis);
@@ -300,8 +333,11 @@ export class DebugApp {
         ${frameTag}
         <span class="samples">${tracker.sampleCount} samples</span>
       </div>
+      <div class="sagittal-verdict ${gravity.state}">
+        ท่า 0 (ยืนนิ่ง) accel gravity → ${gravity.message}
+      </div>
       <div class="sagittal-verdict ${sagittal.isCorrect ? 'ok' : 'bad'}">
-        Sagittal axis (peak gyro) = <b>${sagittal.axis}</b> ${sagittal.isCorrect ? '✅ (gx ถูกต้อง)' : '❌ ต้อง remap (ควรเป็น gx)'}
+        ท่า 1 sagittal axis (peak gyro) = <b>${sagittal.axis}</b> ${sagittal.isCorrect ? '✅ (gx ถูกต้อง)' : '❌ ต้อง remap (ควรเป็น gx)'}
         &nbsp;— peak ${sagittal.value.toFixed(0)}°/s
       </div>
       <table class="debug-table">
@@ -349,6 +385,23 @@ export class DebugApp {
         <br>(peak+ และ peak− มีทั้งคู่ทุกข้างเป็นเรื่องปกติ — มีทั้งจังหวะไปหน้าและดีดกลับ อย่าตัดสินจาก peak อย่างเดียว)
       </div>
     </div>`;
+  }
+
+  // เตือนเมื่อต่อ BLE สำเร็จหลายตัวแต่เห็น tracker น้อยกว่า = ชื่อ BLE ซ้ำ (side/key ชนกัน)
+  // ทำให้เซนเซอร์ตัวที่สองถูกกลืนรวมเป็นตัวเดียว — ดูเหมือน "ต่อไม่ติด" ทั้งที่ต่อติด
+  _renderConnectionWarning() {
+    if (!this.els.warning) {
+      return;
+    }
+    const distinct = this.trackers.size;
+    if (this.connectedCount >= 2 && distinct < this.connectedCount) {
+      this.els.warning.innerHTML = `⚠️ ต่อ BLE สำเร็จ ${this.connectedCount} ตัว แต่เห็น ${distinct} side/tracker`
+        + ' — ชื่อ BLE อาจซ้ำกัน ทำให้ตัวที่สองถูกกลืนรวม (แก้ SENSOR_ID ให้ต่างกัน:'
+        + ' DernDee_L_Shank / DernDee_R_Shank)';
+      this.els.warning.style.display = 'block';
+    } else {
+      this.els.warning.style.display = 'none';
+    }
   }
 
   _setStatus(text) {

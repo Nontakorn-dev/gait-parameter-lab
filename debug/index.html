@@ -22,12 +22,14 @@
   </header>
 
   <div class="debug-status" id="debug-status">Loading…</div>
+  <div class="debug-warning" id="debug-warning" style="display:none"></div>
 
   <main class="debug-main">
     <section class="debug-guide">
       <b>วิธีทำ:</b>
       <ol>
         <li>ติดเซนเซอร์ที่หน้าแข้งทั้งสองข้าง ยึดแน่น → กด <b>Connect Sensors</b></li>
+        <li><b>ท่า 0 (ยืนนิ่ง):</b> ยืนตรง หน้าแข้งตั้งฉาก → accel gravity ต้องอยู่ที่ <b>ay ≈ −1g</b> (ไฟเขียว)</li>
         <li><b>ท่า 1:</b> แกว่งขาหน้า-หลังช้า ๆ ข้างละ 3–4 ครั้ง → แกน gyro ที่ peak สูงสุด (★) ต้องเป็น <b>gx</b></li>
         <li>กด <b>Reset Peaks</b> → <b>ท่า 2:</b> แกว่ง<b>ไปข้างหน้า</b> ทั้งสองข้าง → ดู <b>live sign</b> ของแกน sagittal ต้องเหมือนกัน</li>
       </ol>

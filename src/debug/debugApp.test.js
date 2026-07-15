@@ -3,6 +3,7 @@ import assert from 'node:assert/strict';
 
 import {
   detectSagittalAxis,
+  detectGravityAxis,
   peakAbsFrom,
   extractAxes,
   updateTracker,
@@ -18,6 +19,29 @@ function feedGyroX(tracker, dpsSeq) {
     updateTracker(tracker, { rawGyroSensor: [dps * 16.4, 0, 0], rawAccelSensor: [0, 0, 0] });
   }
 }
+
+test('ท่า 0: ยืนนิ่ง ay≈−1g = ถูกต้อง (ok)', () => {
+  const r = detectGravityAxis({ ax: 0.01, ay: -0.99, az: 0.02 });
+  assert.equal(r.axis, 'ay');
+  assert.equal(r.state, 'ok');
+});
+
+test('ท่า 0: gravity อยู่ที่ az แทน ay = แกน accel สลับ (bad, ต้อง remap)', () => {
+  const r = detectGravityAxis({ ax: 0.02, ay: 0.01, az: -1.0 });
+  assert.equal(r.axis, 'az');
+  assert.equal(r.state, 'bad');
+});
+
+test('ท่า 0: ay = +1g (กลับหัว/sign) = bad', () => {
+  const r = detectGravityAxis({ ax: 0, ay: 1.0, az: 0 });
+  assert.equal(r.axis, 'ay');
+  assert.equal(r.state, 'bad');
+});
+
+test('ท่า 0: gravity ยังไม่นิ่งที่ 1g (กำลังขยับ) = pending', () => {
+  const r = detectGravityAxis({ ax: 0.3, ay: -0.5, az: 0.4 });
+  assert.equal(r.state, 'pending');
+});
 
 test('ท่า 1: detectSagittalAxis คืน gx เมื่อ gx peak สูงสุด (✅)', () => {
   const r = detectSagittalAxis({ gx: 320, gy: 40, gz: 25 });
