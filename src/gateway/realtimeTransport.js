@@ -99,6 +99,7 @@ function decodePacket(buffer) {
     ],
     timestamp_ms: dataView.getUint32(5, true) / 1000,
     seq: dataView.getUint16(3, true),
+    version: dataView.getUint8(2),
   }
 }
 
@@ -614,6 +615,10 @@ class BrowserBleManager {
             timestamp_ms: decoded.timestamp_ms,
             raw_accel: canonical.accel,
             raw_gyro: canonical.gyro,
+            // raw ก่อน remap (sensor frame) + firmware version สำหรับ trace export/offline reprocess
+            raw_accel_sensor: decoded.raw_accel,
+            raw_gyro_sensor: decoded.raw_gyro,
+            firmware_version: decoded.version,
             seq: decoded.seq,
           },
         })

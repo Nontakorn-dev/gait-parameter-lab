@@ -29,6 +29,20 @@ export function applyAxisMap(accel, gyro, side, axisMap = AXIS_MAP) {
   }
 }
 
+// ให้ trace export บันทึกว่าใช้ axis map ตัวไหน (deep clone กัน mutate)
+export function getActiveAxisMap() {
+  return JSON.parse(JSON.stringify(AXIS_MAP))
+}
+
+function readArrayField(payload, ...keys) {
+  for (const key of keys) {
+    if (Array.isArray(payload?.[key])) {
+      return payload[key].map(Number)
+    }
+  }
+  return null
+}
+
 function inferSideFromText(value = '') {
   const normalizedValue = String(value || '').trim().toUpperCase()
 
@@ -148,11 +162,17 @@ export function normalizeRealtimeSensorSample(payload) {
 
   // Pass-through เท่านั้น: axis remap ทำแล้วที่ transport decode boundary (ดู applyAxisMap).
   // ข้อมูลที่เข้ามาที่นี่เป็น canonical frame แล้วเสมอ.
+  // carry ฟิลด์ดิบก่อน remap + seq + firmware version ผ่านไปให้ trace recorder
+  // (อ่านได้ทั้ง snake_case จาก transport และ camelCase จากรอบ normalize ก่อนหน้า)
   return {
     ...normalized,
     timestampMs: normalized.timestamp_ms,
     raw_accel: [normalized.ax, normalized.ay, normalized.az],
     raw_gyro: [normalized.gx, normalized.gy, normalized.gz],
+    rawAccelSensor: readArrayField(payload, 'raw_accel_sensor', 'rawAccelSensor'),
+    rawGyroSensor: readArrayField(payload, 'raw_gyro_sensor', 'rawGyroSensor'),
+    firmwareVersion: toFiniteNumber(payload?.firmware_version ?? payload?.firmwareVersion),
+    seq: toFiniteNumber(payload?.seq),
   }
 }
 

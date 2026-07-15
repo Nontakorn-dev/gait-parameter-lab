@@ -13,11 +13,18 @@ import {
 import {
   readGaitCalibrationPrefs,
   writeGaitCalibrationPrefs,
+  readGaitCalibrationProfiles,
 } from '../gait/gaitCalibrationStore.js';
 import {
   getRealtimeSensorLabel,
   normalizeRealtimeSensorSample,
+  getActiveAxisMap,
 } from '../gateway/realtimeSensorUtils.js';
+import {
+  TraceRecorder,
+  downloadTraceJson,
+  buildTraceFilename,
+} from './data/traceRecorder.js';
 import {
   GAIT_ANALYSIS_INTERVAL_MS,
   GAIT_MIN_ANALYSIS_SAMPLES,
@@ -171,6 +178,7 @@ export class GaitLabDashboardApp {
     this.calibrationTimer = null;
     this.calibrationProgressTimer = null;
     this.pendingShankLengthM = estimateShankLengthM();
+    this.traceRecorder = new TraceRecorder({ sampleRateHz: 100 });
   }
 
   init() {
@@ -497,6 +505,12 @@ export class GaitLabDashboardApp {
       return;
     }
 
+    // บันทึก trace ทุก sample ที่ valid (ก่อนกรอง visibility) เพื่อไม่ให้พลาดเซนเซอร์ใด
+    if (this.traceRecorder.isRecording()) {
+      this.traceRecorder.record(normalizedSample);
+      this._updateTraceRecordingUi();
+    }
+
     this.availableSensors.set(normalizedSample.sensorKey, {
       sensorKey: normalizedSample.sensorKey,
       side: normalizedSample.side,
@@ -613,6 +627,14 @@ export class GaitLabDashboardApp {
       this.openCalibration();
     });
 
+    document.getElementById('btn-record')?.addEventListener('click', () => {
+      this.toggleTraceRecording();
+    });
+
+    document.getElementById('btn-export')?.addEventListener('click', () => {
+      this.exportTrace();
+    });
+
     document.getElementById('btn-calibration-cancel')?.addEventListener('click', () => {
       this.dashboard.closeCalibrationPanel();
     });
@@ -624,6 +646,58 @@ export class GaitLabDashboardApp {
     document.getElementById('btn-calibration-done')?.addEventListener('click', () => {
       this.dashboard.closeCalibrationPanel();
     });
+  }
+
+  toggleTraceRecording() {
+    if (this.traceRecorder.isRecording()) {
+      this.stopTraceRecording();
+    } else {
+      this.startTraceRecording();
+    }
+  }
+
+  startTraceRecording() {
+    this.traceRecorder.start();
+    this._setRecordButtonState(true, 0);
+  }
+
+  stopTraceRecording() {
+    const count = this.traceRecorder.stop();
+    this._setRecordButtonState(false, count);
+  }
+
+  exportTrace() {
+    if (this.traceRecorder.isRecording()) {
+      this.stopTraceRecording();
+    }
+    if (!this.traceRecorder.sampleCount()) {
+      window.alert?.('No trace recorded yet. Press Record and walk first.');
+      return;
+    }
+
+    const profiles = readGaitCalibrationProfiles();
+    const trace = this.traceRecorder.buildTrace({
+      axisMap: getActiveAxisMap(),
+      calibrationBySensor: profiles.bySensorKey || {},
+      appVersion: '1.0.0',
+    });
+    downloadTraceJson(trace, buildTraceFilename());
+  }
+
+  _updateTraceRecordingUi() {
+    // อัปเดต DOM แบบ throttle กัน thrash ที่ 100Hz
+    if (this.traceRecorder.sampleCount() % 25 === 0) {
+      this._setRecordButtonState(true, this.traceRecorder.sampleCount());
+    }
+  }
+
+  _setRecordButtonState(isRecording, count) {
+    const button = document.getElementById('btn-record');
+    if (!button) {
+      return;
+    }
+    button.textContent = isRecording ? `■ Stop (${count})` : '● Record';
+    button.classList.toggle('recording', isRecording);
   }
 
   _readCalibrationPrefs() {
