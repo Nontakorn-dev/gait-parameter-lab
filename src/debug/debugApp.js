@@ -254,12 +254,14 @@ export class DebugApp {
       const count = this.traceRecorder.stop();
       if (this.els.record) {
         this.els.record.textContent = '● Record';
+        this.els.record.classList.remove('recording');
       }
       this._setStatus(`Recording stopped (${count} samples). Export to save.`);
     } else {
       this.traceRecorder.start();
       if (this.els.record) {
         this.els.record.textContent = '■ Stop';
+        this.els.record.classList.add('recording');
       }
       this._setStatus('Recording raw trace...');
     }

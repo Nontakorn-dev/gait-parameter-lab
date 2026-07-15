@@ -9,7 +9,7 @@
   <header class="debug-header">
     <div>
       <h1>Swing Test / Axis Debug</h1>
-      <p class="debug-sub">Raw 6-axis (ก่อน remap) — ตรวจ sagittal axis (ท่า 1) และ polarity L/R (ท่า 2)</p>
+      <p class="debug-sub">Raw 6-axis (ก่อน remap) — ตรวจ sagittal axis, accel gravity, และ polarity L/R</p>
     </div>
     <div class="debug-controls">
       <button class="btn primary" id="debug-connect" type="button">Connect Sensors</button>
@@ -17,16 +17,16 @@
       <button class="btn" id="debug-reset" type="button">Reset Peaks</button>
       <button class="btn" id="debug-record" type="button">● Record</button>
       <button class="btn" id="debug-export" type="button">Export</button>
-      <a class="btn link" href="/">← Main</a>
+      <a class="btn" href="/">← Main</a>
     </div>
   </header>
 
-  <div class="debug-status" id="debug-status">Loading…</div>
+  <div class="debug-statusbar" id="debug-status">Loading…</div>
   <div class="debug-warning" id="debug-warning" style="display:none"></div>
 
   <main class="debug-main">
     <section class="debug-guide">
-      <b>วิธีทำ:</b>
+      <b>วิธีทำ</b>
       <ol>
         <li>ติดเซนเซอร์ที่หน้าแข้งทั้งสองข้าง ยึดแน่น → กด <b>Connect Sensors</b></li>
         <li><b>ท่า 0 (ยืนนิ่ง):</b> ยืนตรง หน้าแข้งตั้งฉาก → accel gravity ต้องอยู่ที่ <b>ay ≈ −1g</b> (ไฟเขียว)</li>
@@ -36,7 +36,9 @@
       <p class="debug-warn">⚠️ Export จากหน้านี้ใช้สำหรับ swing-test เท่านั้น — ไม่ใช่ trace เดิน 10 เมตร (ไม่มีระยะจริง). ใช้ปุ่ม Export บนหน้าหลักสำหรับ validation walk</p>
     </section>
 
-    <div class="debug-sensors" id="debug-sensors"></div>
+    <div class="debug-sensors" id="debug-sensors">
+      <div class="debug-empty">Waiting for sensor data…</div>
+    </div>
     <div id="debug-verdict"></div>
   </main>
 
