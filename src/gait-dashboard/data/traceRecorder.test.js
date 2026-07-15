@@ -171,6 +171,82 @@ test('seq gap แยกต่อเซนเซอร์', () => {
   assert.equal(dropped.R, 2);
 });
 
+function cycleDiagnostic(overrides = {}) {
+  return {
+    cycleKey: '42',
+    cycleStartTimestampMs: 1000,
+    strideLengthM: 1.2,
+    strideLengthClamped: false,
+    zuptCheck: {
+      vStartPreDrift: 0.01,
+      vEndPreDrift: -0.55,
+      windowSource: 'post-peak-valley',
+      zuptAccelDeviationG: 0.21,
+    },
+    sensorKey: 'DernDee_R_Shank',
+    side: 'R',
+    ...overrides,
+  };
+}
+
+test('recordCycle ถูก ignore เมื่อยังไม่ start (เหมือน record)', () => {
+  const rec = new TraceRecorder();
+  rec.recordCycle(cycleDiagnostic());
+  assert.equal(rec.cycleCount(), 0);
+});
+
+test('recordCycle เก็บ zuptCheck ครบ และ buildTrace ใส่ลง trace.cycles จริง (ปิดช่องโหว่ params≠trace)', () => {
+  const rec = new TraceRecorder();
+  rec.start();
+  rec.recordCycle(cycleDiagnostic());
+  const trace = rec.buildTrace();
+
+  assert.equal(trace.cycleCount, 1);
+  assert.equal(trace.cycles.length, 1);
+  const entry = trace.cycles[0];
+  assert.equal(entry.cycleKey, '42');
+  assert.equal(entry.strideLengthM, 1.2);
+  assert.equal(entry.zuptCheck.vEndPreDrift, -0.55);
+  assert.equal(entry.zuptCheck.windowSource, 'post-peak-valley');
+  assert.equal(entry.sensorKey, 'DernDee_R_Shank');
+});
+
+test('recordCycle เก็บได้ทุก cycle ไม่ใช่แค่ตัวสุดท้าย', () => {
+  const rec = new TraceRecorder();
+  rec.start();
+  rec.recordCycle(cycleDiagnostic({ cycleKey: '1' }));
+  rec.recordCycle(cycleDiagnostic({ cycleKey: '2' }));
+  rec.recordCycle(cycleDiagnostic({ cycleKey: '3' }));
+  const trace = rec.buildTrace();
+  assert.deepEqual(trace.cycles.map((c) => c.cycleKey), ['1', '2', '3']);
+});
+
+test('recordCycle หยุดรับที่ maxCycles (ไม่โตไม่จำกัด)', () => {
+  const rec = new TraceRecorder({ maxCycles: 3 });
+  rec.start();
+  for (let i = 0; i < 10; i += 1) {
+    rec.recordCycle(cycleDiagnostic({ cycleKey: String(i) }));
+  }
+  assert.equal(rec.cycleCount(), 3, 'ต้องไม่เกิน cap');
+});
+
+test('start() ล้าง cycles เดิม', () => {
+  const rec = new TraceRecorder();
+  rec.start();
+  rec.recordCycle(cycleDiagnostic());
+  assert.equal(rec.cycleCount(), 1);
+  rec.start();
+  assert.equal(rec.cycleCount(), 0);
+});
+
+test('note อธิบาย cycles[]/zuptCheck ไว้ในไฟล์', () => {
+  const rec = new TraceRecorder();
+  rec.start();
+  const trace = rec.buildTrace();
+  assert.ok(/cycles\[\]/.test(trace.note));
+  assert.ok(/zuptCheck/.test(trace.note));
+});
+
 test('buildTraceFilename มีรูปแบบ timestamp', () => {
   const name = buildTraceFilename(new Date('2026-07-15T09:08:07'));
   assert.equal(name, 'gait-trace-20260715-090807.json');

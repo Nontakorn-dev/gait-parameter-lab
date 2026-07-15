@@ -23,11 +23,15 @@ const SEQ_WRAP = 65536; // seq เป็น uint16 (firmware g_nextSeq) wrap ท
 const SEQ_DROP_GAP_MAX = 2000;
 
 export class TraceRecorder {
-  constructor({ sampleRateHzNominal = 100, maxSamples = 300000 } = {}) {
+  constructor({ sampleRateHzNominal = 100, maxSamples = 300000, maxCycles = 20000 } = {}) {
     this.sampleRateHzNominal = sampleRateHzNominal;
     this.maxSamples = maxSamples;
+    // cycle diagnostic เบากว่า raw sample มาก (ไม่กี่ตัวเลขต่อ cycle) ให้ cap สูงกว่าได้สบาย —
+    // 1 stride ~1s ดังนั้น default 20000 cycles ครอบคลุมเดินต่อเนื่อง >5 ชม. เกินพอสำหรับ session จริง
+    this.maxCycles = maxCycles;
     this.recording = false;
     this.samples = [];
+    this.cycles = [];
     this.startedAt = null;
     this.packetVersionBySensor = {};
     this.truncated = false;
@@ -41,6 +45,10 @@ export class TraceRecorder {
     return this.samples.length;
   }
 
+  cycleCount() {
+    return this.cycles.length;
+  }
+
   isTruncated() {
     return this.truncated;
   }
@@ -48,6 +56,7 @@ export class TraceRecorder {
   start() {
     this.recording = true;
     this.samples = [];
+    this.cycles = [];
     this.startedAt = Date.now();
     this.packetVersionBySensor = {};
     this.truncated = false;
@@ -89,6 +98,19 @@ export class TraceRecorder {
       raw_accel_canonical: sample.raw_accel ?? null,
       raw_gyro_canonical: sample.raw_gyro ?? null,
     });
+  }
+
+  // บันทึก ZUPT diagnostic ต่อ cycle (จาก GaitProcessor.onParams -> newCycleDiagnostics)
+  // แยกเส้นทางจาก record() (raw IMU) โดยเจตนา — params ที่ประมวลผลแล้วไม่เคยไหลเข้า trace
+  // มาก่อน ทำให้ export ไปวิเคราะห์ ZUPT ไม่ได้เลยแม้จะมีค่าคำนวณอยู่ใน live params ก็ตาม
+  recordCycle(cycleDiagnostic) {
+    if (!this.recording || !cycleDiagnostic) {
+      return;
+    }
+    if (this.cycles.length >= this.maxCycles) {
+      return;
+    }
+    this.cycles.push(cycleDiagnostic);
   }
 
   // วัด sample rate จริงจาก timestamp ต่อเซนเซอร์ (median ของ 1/Δt) — ไม่ใช้ค่า nominal ลอย ๆ
@@ -209,8 +231,12 @@ export class TraceRecorder {
         + 'and are the source of truth. raw_accel_canonical / raw_gyro_canonical are '
         + 'post-remap (what the live pipeline consumed). Reprocess from *_sensor if axisMap is wrong. '
         + 'packetVersionBySensor is the IMU packet format version, NOT the firmware version '
-        + '(see firmwareBuildTag).',
+        + '(see firmwareBuildTag). cycles[] carries per-cycle ZUPT diagnostics '
+        + '(zuptCheck: vStartPreDrift/vEndPreDrift/windowSource/zuptAccelDeviationG) for every '
+        + 'gait cycle seen during the recording, not just the last one.',
       samples: this.samples,
+      cycleCount: this.cycles.length,
+      cycles: this.cycles,
     };
   }
 }

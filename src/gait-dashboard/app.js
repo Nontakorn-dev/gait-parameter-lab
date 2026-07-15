@@ -463,9 +463,22 @@ export class GaitLabDashboardApp {
       processor,
     };
 
-    processor.onParams(({ params, processedData }) => {
+    processor.onParams(({ params, processedData, newCycleDiagnostics }) => {
       state.latestParams = params;
       state.latestProcessedData = processedData;
+
+      // ต่อ trace เข้ากับ ZUPT diagnostic ต่อ cycle จริง — เดิม trace มีแค่ raw IMU sample
+      // (params ที่ประมวลผลแล้วไม่เคยไหลเข้าไฟล์ export เลย) จุดนี้คือจุดเดียวที่เชื่อมสองเส้นทางนี้เข้าด้วยกัน
+      if (this.traceRecorder.isRecording() && newCycleDiagnostics?.length) {
+        for (const diagnostic of newCycleDiagnostics) {
+          this.traceRecorder.recordCycle({
+            ...diagnostic,
+            sensorKey: state.sensorKey,
+            side: state.side,
+          });
+        }
+      }
+
       this._renderDashboard();
     });
 

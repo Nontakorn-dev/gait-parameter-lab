@@ -388,6 +388,9 @@ export class GaitProcessor {
     this.totalStepCount = 0;
     this.totalStrideCount = 0;
     this.countedCycleStartSampleIds = new Set();
+    // ZUPT diagnostic ต่อ cycle (ไม่ใช่แค่ cycle ล่าสุด) รอให้ analyze() drain ไปแนบกับ
+    // payload ที่ส่งออกทาง onParams — ตรงนี้คือจุดเดียวที่ trace (ผ่าน app.js) จะได้ค่านี้จริง
+    this.pendingCycleDiagnostics = [];
     this.nextSampleId = 1;
     this.sessionStartTime = null;
     this.latestSampleTimestampMs = null;
@@ -516,16 +519,14 @@ export class GaitProcessor {
     const strideClampedFlags = [];
     const strideSignedLengths = [];
     const zuptAccelDeviations = [];
-    const velocityPreDriftCorrections = [];
 
     for (const cycle of cycles) {
       // นับทุก cycle ที่ยังไม่เคยนับ (ไม่ใช่แค่ cycle สุดท้าย) เพื่อไม่ให้พลาด
       // cycle ที่มีอยู่ใน buffer ตั้งแต่ analyze() ครั้งแรก 1 cycle = 1 stride = 2 steps
       const countableCycleStartSampleId = samples[cycle.hsStart.index]?.sampleId ?? null;
-      if (
-        countableCycleStartSampleId !== null
-        && !this.countedCycleStartSampleIds.has(countableCycleStartSampleId)
-      ) {
+      const isNewCycle = countableCycleStartSampleId !== null
+        && !this.countedCycleStartSampleIds.has(countableCycleStartSampleId);
+      if (isNewCycle) {
         this.countedCycleStartSampleIds.add(countableCycleStartSampleId);
         this.totalStepCount += 2;
       }
@@ -580,8 +581,6 @@ export class GaitProcessor {
           dt: winDt,
         },
       );
-      velocityPreDriftCorrections.push(velocityPreDriftCorrection);
-
       const strideLength = Math.max(
         STRIDE_LENGTH_MIN_M,
         Math.min(STRIDE_LENGTH_MAX_M, integratedStrideLength),
@@ -609,6 +608,29 @@ export class GaitProcessor {
       strideClampedFlags.push(strideClamped);
       strideSignedLengths.push(strideLengthSigned);
       zuptAccelDeviations.push(zuptDeviation);
+
+      // เก็บ ZUPT diagnostic ของ "ทุก" cycle ใหม่ (ไม่ใช่แค่ cycle สุดท้ายที่ latestParams เก็บ)
+      // เพื่อให้วิเคราะห์ได้ว่า window วางผิดจุดเป็นระบบหรือแค่บางจังหวะ — วางคู่กับ isNewCycle
+      // เดียวกับที่ใช้นับ step เพื่อไม่ให้ diagnostic ซ้ำ cycle เดิมเวลา buffer overlap กันข้าม analyze()
+      if (isNewCycle) {
+        const preDrift = velocityPreDriftCorrection || [];
+        this.pendingCycleDiagnostics.push({
+          cycleKey: String(countableCycleStartSampleId),
+          cycleStartTimestampMs: samples[cycle.hsStart.index]?.timestampMs ?? null,
+          strideLengthM: strideLength,
+          strideLengthClamped: strideClamped,
+          zuptCheck: {
+            vStartPreDrift: Number.isFinite(preDrift[0]) ? preDrift[0] : null,
+            vEndPreDrift: Number.isFinite(preDrift[preDrift.length - 1]) ? preDrift[preDrift.length - 1] : null,
+            windowSource: integrationWindow.source ?? null,
+            zuptAccelDeviationG: Number.isFinite(zuptDeviation) ? zuptDeviation : null,
+          },
+        });
+        // กันโตไม่จำกัดถ้าไม่มีใคร drain (เช่น analyze() ถูกเรียกโดยไม่มี consumer)
+        if (this.pendingCycleDiagnostics.length > 500) {
+          this.pendingCycleDiagnostics.shift();
+        }
+      }
     }
 
     if (cycles.length === 0) {
@@ -620,7 +642,11 @@ export class GaitProcessor {
         cycles,
         integrationWindow: null,
       };
-      this.paramListeners.forEach((callback) => callback({ params: null, processedData: this.processedData }));
+      this.paramListeners.forEach((callback) => callback({
+        params: null,
+        processedData: this.processedData,
+        newCycleDiagnostics: this._drainCycleDiagnostics(),
+      }));
       return;
     }
 
@@ -632,7 +658,6 @@ export class GaitProcessor {
     const strideClampedLast = strideClampedFlags[lastIdx] ?? false;
     const strideSignedLast = strideSignedLengths[lastIdx];
     const zuptAccelDeviationLast = zuptAccelDeviations[lastIdx];
-    const velocityPreDriftCorrectionLast = velocityPreDriftCorrections[lastIdx];
     const strideTimeLast = strideTimes[lastIdx];
     const stancePctLast = stancePcts[lastIdx];
     const swingPctLast = swingPcts[lastIdx];
@@ -679,9 +704,6 @@ export class GaitProcessor {
       strideLengthClamped: strideClampedLast,
       strideLengthSignedM: strideSignedLast,
       zuptAccelDeviationG: Number.isFinite(zuptAccelDeviationLast) ? zuptAccelDeviationLast : null,
-      // v ก่อน correctDrift บังคับ v=0 ที่ปลาย window — ไว้ตรวจว่า ZUPT ถูกวางในจุดที่นิ่งจริงไหม
-      // (ดู zuptAccelDeviationG คู่กัน: ‖accel‖ ใกล้ 1g ที่ปลาย window ควรคู่กับ v ก่อนแก้ใกล้ 0)
-      velocityPreDriftCorrectionMps: velocityPreDriftCorrectionLast ?? [],
       clearance: clearanceLast,
       cadence,
       strideTime: strideTimeLast,
@@ -708,9 +730,6 @@ export class GaitProcessor {
       integrationEndTimestampS: lastIntegrationWindow?.endTime ?? null,
       integrationAngularVelocityThresholdDps: lastIntegrationWindow?.threshold ?? null,
       integrationSource: lastIntegrationWindow?.source ?? null,
-      // alias ของ integrationSource ไว้อ่านคู่กับ velocityPreDriftCorrectionMps โดยตรง
-      // (บอกว่า window ที่ velocity array นี้ครอบมาจาก heuristic ไหนใน findStepIntegrationWindow)
-      windowSource: lastIntegrationWindow?.source ?? null,
       cycleKey: cycleStartSampleId !== null ? String(cycleStartSampleId) : `${cycleStartTimestampMs ?? Date.now()}`,
       side: cycleStartSample?.side ?? null,
       sensorName: cycleStartSample?.sensorName ?? null,
@@ -737,7 +756,14 @@ export class GaitProcessor {
     this.paramListeners.forEach((callback) => callback({
       params: this.latestParams,
       processedData: this.processedData,
+      newCycleDiagnostics: this._drainCycleDiagnostics(),
     }));
+  }
+
+  _drainCycleDiagnostics() {
+    const drained = this.pendingCycleDiagnostics;
+    this.pendingCycleDiagnostics = [];
+    return drained;
   }
 
   reset() {
@@ -747,6 +773,7 @@ export class GaitProcessor {
     this.totalStepCount = 0;
     this.totalStrideCount = 0;
     this.countedCycleStartSampleIds = new Set();
+    this.pendingCycleDiagnostics = [];
     this.nextSampleId = 1;
     this.sessionStartTime = null;
     this.latestSampleTimestampMs = null;
