@@ -25,6 +25,7 @@ export class VelocityIntegrator {
     if (sampleCount < 2) {
       return {
         strideLength: 0,
+        strideLengthSigned: 0,
         clearance: 0,
         velocity: [],
         displacement: [],
@@ -55,6 +56,7 @@ export class VelocityIntegrator {
     if (swingHoriz.length < 2) {
       return {
         strideLength: 0,
+        strideLengthSigned: 0,
         clearance: 0,
         velocity: [],
         displacement: [],
@@ -78,11 +80,14 @@ export class VelocityIntegrator {
       maxVertical = Math.max(maxVertical, value);
     }
 
-    const strideLength = Math.abs(displacement[displacement.length - 1]);
+    const signedDisplacement = displacement[displacement.length - 1];
+    const strideLength = Math.abs(signedDisplacement);
     const clearance = Math.max(0, maxVertical - minVertical);
 
     return {
       strideLength,
+      // ค่ามีเครื่องหมายไว้ debug: ถ้า axis-map sign ผิด abs() จะปิดบัง แต่ค่านี้จะเป็นลบ
+      strideLengthSigned: signedDisplacement,
       clearance,
       velocity,
       displacement,

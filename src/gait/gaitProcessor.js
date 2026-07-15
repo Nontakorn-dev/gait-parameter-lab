@@ -12,7 +12,8 @@ const EPOCH_THRESHOLD_MS = 946684800000;
 const STANCE_ENTRY_ANGULAR_VELOCITY_ABS = 5;
 // การ integrate ความเร่งตลอด HS→HS ของขาเดียวกัน = ระยะ 1 stride โดยตรง
 // step = stride/2 (ประมาณ เพราะเซนเซอร์ข้างเดียววัด step ของขาตรงข้ามไม่ได้)
-const STRIDE_LENGTH_MIN_M = 0.30;
+// floor ต่ำ (0.10) เพื่อไม่ทำลายข้อมูลผู้ป่วย stroke ที่ stride สั้นกว่า 0.30m ได้จริง
+const STRIDE_LENGTH_MIN_M = 0.10;
 const STRIDE_LENGTH_MAX_M = 1.80;
 const STANCE_ENTRY_THRESHOLD_MIN = 3;
 const STANCE_ENTRY_THRESHOLD_MAX = 12;
@@ -478,6 +479,7 @@ export class GaitProcessor {
     const angVelDeg = new Array(sampleCount);
     const shankAngle = new Array(sampleCount);
     const timestamps = new Array(sampleCount);
+    const axG = new Array(sampleCount);
     const ayG = new Array(sampleCount);
     const azG = new Array(sampleCount);
     const firstTimestampMs = samples[0]?.timestampMs ?? null;
@@ -490,10 +492,12 @@ export class GaitProcessor {
 
       const gyro = readGyroDps(sample, this.gyroBiasDps);
       const gx = gyro.gx;
+      const aXg = rawAccelToG(getRawAxis(sample, 'ax', 'raw_accel', 0));
       const aYg = rawAccelToG(getRawAxis(sample, 'ay', 'raw_accel', 1));
       const aZg = rawAccelToG(getRawAxis(sample, 'az', 'raw_accel', 2));
 
       angVelDeg[i] = gx;
+      axG[i] = aXg;
       ayG[i] = aYg;
       azG[i] = aZg;
       shankAngle[i] = Number.isFinite(sample.shankAngle) ? sample.shankAngle : 0;
@@ -509,6 +513,9 @@ export class GaitProcessor {
     const peakAngles = [];
     const clearances = [];
     const integrationWindows = [];
+    const strideClampedFlags = [];
+    const strideSignedLengths = [];
+    const zuptAccelDeviations = [];
 
     for (const cycle of cycles) {
       // นับทุก cycle ที่ยังไม่เคยนับ (ไม่ใช่แค่ cycle สุดท้าย) เพื่อไม่ให้พลาด
@@ -557,7 +564,7 @@ export class GaitProcessor {
         ? (timestamps[metricEndIdx] - timestamps[metricStartIdx]) / segmentSampleSpan
         : (1.0 / SAMPLE_RATE);
 
-      const { strideLength: integratedStrideLength, clearance } = this.velocityIntegrator.computeStrideMetrics(
+      const { strideLength: integratedStrideLength, strideLengthSigned, clearance } = this.velocityIntegrator.computeStrideMetrics(
         cycleAy,
         cycleAz,
         cycleAngles,
@@ -573,10 +580,28 @@ export class GaitProcessor {
         Math.min(STRIDE_LENGTH_MAX_M, integratedStrideLength),
       );
       const stepLength = strideLength / 2;
+      // flag เมื่อค่าถูก clamp (ชนเพดาน/พื้น) เพื่อไม่ให้ปนกับค่าวัดจริงตอนทำ ICC/Bland-Altman
+      const strideClamped = integratedStrideLength < STRIDE_LENGTH_MIN_M
+        || integratedStrideLength > STRIDE_LENGTH_MAX_M;
+      // ZUPT-validity: correctDrift สมมติ v=0 ที่ปลาย window — ถ้าปลายไม่ใช่จุดเท้านิ่ง
+      // (‖accel‖ เบี่ยงจาก 1g มาก) การประมาณระยะจะต่ำกว่าจริงแบบ systematic. ตรวจ ‖accel‖
+      // ที่ขอบ window เพื่อ mark ค่า low-confidence โดยไม่แก้ค่า (การย้าย window ต้อง validate ข้อมูลจริง)
+      const accelMagAt = (idx) => (idx >= 0 && idx < sampleCount
+        ? Math.sqrt(axG[idx] * axG[idx] + ayG[idx] * ayG[idx] + azG[idx] * azG[idx])
+        : NaN);
+      const startDev = Math.abs(accelMagAt(metricStartIdx) - 1);
+      const endDev = Math.abs(accelMagAt(metricEndIdx) - 1);
+      const zuptDeviation = Math.max(
+        Number.isFinite(startDev) ? startDev : 0,
+        Number.isFinite(endDev) ? endDev : 0,
+      );
 
       stepLengths.push(stepLength);
       strideLengths.push(strideLength);
       clearances.push(Math.max(0, Math.min(0.3, clearance)));
+      strideClampedFlags.push(strideClamped);
+      strideSignedLengths.push(strideLengthSigned);
+      zuptAccelDeviations.push(zuptDeviation);
     }
 
     if (cycles.length === 0) {
@@ -597,6 +622,9 @@ export class GaitProcessor {
     const lastIntegrationWindow = integrationWindows[lastIdx] ?? null;
     const stepLengthLast = stepLengths[lastIdx];
     const strideLengthLast = strideLengths[lastIdx];
+    const strideClampedLast = strideClampedFlags[lastIdx] ?? false;
+    const strideSignedLast = strideSignedLengths[lastIdx];
+    const zuptAccelDeviationLast = zuptAccelDeviations[lastIdx];
     const strideTimeLast = strideTimes[lastIdx];
     const stancePctLast = stancePcts[lastIdx];
     const swingPctLast = swingPcts[lastIdx];
@@ -639,6 +667,10 @@ export class GaitProcessor {
     this.latestParams = {
       strideLength: strideLengthLast,
       stepLength,
+      // clinical metadata: แยกค่าที่ถูก clamp ออกจากค่าวัดจริง + ธง ZUPT low-confidence
+      strideLengthClamped: strideClampedLast,
+      strideLengthSignedM: strideSignedLast,
+      zuptAccelDeviationG: Number.isFinite(zuptAccelDeviationLast) ? zuptAccelDeviationLast : null,
       clearance: clearanceLast,
       cadence,
       strideTime: strideTimeLast,

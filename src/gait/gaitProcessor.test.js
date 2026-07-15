@@ -8,7 +8,11 @@ import { generateWalkingData } from '../gait-dashboard/data/demoDataGenerator.js
 function runPipeline({ stubStride } = {}) {
   const proc = new GaitProcessor();
   if (stubStride !== undefined) {
-    proc.velocityIntegrator.computeStrideMetrics = () => ({ strideLength: stubStride, clearance: 0.05 });
+    proc.velocityIntegrator.computeStrideMetrics = () => ({
+      strideLength: stubStride,
+      strideLengthSigned: stubStride,
+      clearance: 0.05,
+    });
   }
   const { samples } = generateWalkingData({ numStrides: 12, strideTime: 1.05 });
   const t0 = Date.now();
@@ -45,4 +49,28 @@ test('strideLength ขึ้นได้เกิน 0.80 (เพดาน step 
 test('เพดาน stride ใหม่ 1.80m: ค่าเกินถูก clamp ที่ 1.80 ไม่ใช่ 1.60', () => {
   const p = runPipeline({ stubStride: 5.0 });
   assert.ok(Math.abs(p.strideLength - 1.80) < 1e-9, `strideLength=${p.strideLength} ควร clamp ที่ 1.80`);
+});
+
+test('floor ใหม่ 0.10m: stride สั้นของผู้ป่วย stroke ไม่ถูกดันขึ้น 0.30', () => {
+  const p = runPipeline({ stubStride: 0.18 });
+  assert.ok(Math.abs(p.strideLength - 0.18) < 1e-9, `strideLength=${p.strideLength} ต้องคงค่า 0.18 (ไม่ clamp)`);
+  assert.equal(p.strideLengthClamped, false);
+});
+
+test('clamp flag: ค่าต่ำกว่า floor ถูก mark strideLengthClamped=true', () => {
+  const p = runPipeline({ stubStride: 0.05 });
+  assert.equal(p.strideLengthClamped, true, 'ค่าต่ำกว่า 0.10 ต้องถูก flag');
+  assert.ok(Math.abs(p.strideLength - 0.10) < 1e-9);
+});
+
+test('clamp flag: ค่าในช่วงปกติไม่ถูก mark', () => {
+  const p = runPipeline({ stubStride: 1.2 });
+  assert.equal(p.strideLengthClamped, false);
+});
+
+test('clinical metadata: strideLengthSignedM และ zuptAccelDeviationG มีค่า (ผ่าน real integrator)', () => {
+  const p = runPipeline();
+  assert.ok(Number.isFinite(p.strideLengthSignedM), 'ต้องมี signed value ไว้ debug ทิศ');
+  assert.ok(Number.isFinite(p.zuptAccelDeviationG) && p.zuptAccelDeviationG >= 0,
+    'ต้องมี ZUPT-validity (‖accel‖ เบี่ยงจาก 1g ที่ปลาย window)');
 });
