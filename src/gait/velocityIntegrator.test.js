@@ -38,6 +38,29 @@ test('computeStrideMetrics fallback เป็น nominal dt เมื่อไ�
   assert.ok(Math.abs(noDt.strideLength - explicit.strideLength) < 1e-9);
 });
 
+test('velocityPreDriftCorrection: ต่างจาก velocity (post-correction) เมื่อปลายสัญญาณไม่นิ่ง', () => {
+  const integ = new VelocityIntegrator({ sampleRate: 100 });
+  const { ay, az, angles } = buildSignal();
+  const { velocity, velocityPreDriftCorrection } = integ.computeStrideMetrics(
+    ay, az, angles,
+    { integrationStartIdx: 0, integrationEndIdx: az.length - 1, dt: 0.01 },
+  );
+
+  assert.equal(velocityPreDriftCorrection.length, velocity.length);
+  // post-correction: correctDrift บังคับ v=0 ที่ปลายทั้งสองเสมอโดยนิยาม
+  assert.ok(Math.abs(velocity[0]) < 1e-9, 'post-correction v เริ่มต้องเป็น 0');
+  assert.ok(Math.abs(velocity[velocity.length - 1]) < 1e-9, 'post-correction v ปลายต้องเป็น 0');
+  // pre-correction: ค่าจริงก่อนถูกบังคับ ต้องต่างจาก post-correction (นี่คือประเด็นที่ export ไว้ตรวจ ZUPT)
+  assert.notEqual(velocityPreDriftCorrection[velocityPreDriftCorrection.length - 1], 0,
+    'pre-correction v ปลายไม่ควรเป็น 0 พอดี (สัญญาณทดสอบมี drift จริง)');
+});
+
+test('velocityPreDriftCorrection ว่างเปล่าเมื่อ window สั้นเกินไป (< 2 samples)', () => {
+  const integ = new VelocityIntegrator({ sampleRate: 100 });
+  const r = integ.computeStrideMetrics([0], [0], [0], { integrationStartIdx: 0, integrationEndIdx: 0 });
+  assert.deepEqual(r.velocityPreDriftCorrection, []);
+});
+
 test('sensorToWorld: sensor นิ่งเอียงทุกมุม → aVert=g, aHoriz=0 (ไม่มี gravity leakage)', () => {
   const integ = new VelocityIntegrator({ sampleRate: 100 });
   for (const theta of [0, 15, 30, 45]) {

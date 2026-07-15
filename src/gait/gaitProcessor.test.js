@@ -12,6 +12,7 @@ function runPipeline({ stubStride } = {}) {
       strideLength: stubStride,
       strideLengthSigned: stubStride,
       clearance: 0.05,
+      velocityPreDriftCorrection: [0, 0.1, 0.2],
     });
   }
   const { samples } = generateWalkingData({ numStrides: 12, strideTime: 1.05 });
@@ -73,4 +74,22 @@ test('clinical metadata: strideLengthSignedM และ zuptAccelDeviationG ม�
   assert.ok(Number.isFinite(p.strideLengthSignedM), 'ต้องมี signed value ไว้ debug ทิศ');
   assert.ok(Number.isFinite(p.zuptAccelDeviationG) && p.zuptAccelDeviationG >= 0,
     'ต้องมี ZUPT-validity (‖accel‖ เบี่ยงจาก 1g ที่ปลาย window)');
+});
+
+test('export: velocityPreDriftCorrectionMps ไหลจาก integrator ผ่าน stub เข้า params ครบ', () => {
+  const p = runPipeline({ stubStride: 0.5 });
+  assert.deepEqual(p.velocityPreDriftCorrectionMps, [0, 0.1, 0.2]);
+});
+
+test('export: velocityPreDriftCorrectionMps เป็น array จริงผ่าน real integrator (ไม่ใช่ stub)', () => {
+  const p = runPipeline();
+  assert.ok(Array.isArray(p.velocityPreDriftCorrectionMps));
+  assert.ok(p.velocityPreDriftCorrectionMps.length > 0, 'ต้องมีค่าใน window ของ cycle จริง');
+});
+
+test('export: windowSource === integrationSource (alias เดียวกันเสมอ ไม่มีวันต่างกัน)', () => {
+  const p = runPipeline();
+  assert.equal(p.windowSource, p.integrationSource);
+  assert.ok(typeof p.windowSource === 'string' && p.windowSource.length > 0,
+    'ต้องเป็นชื่อ heuristic จริงจาก findStepIntegrationWindow');
 });

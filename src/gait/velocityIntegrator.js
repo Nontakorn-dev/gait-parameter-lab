@@ -28,6 +28,7 @@ export class VelocityIntegrator {
         strideLengthSigned: 0,
         clearance: 0,
         velocity: [],
+        velocityPreDriftCorrection: [],
         displacement: [],
         verticalVelocity: [],
         verticalDisplacement: [],
@@ -59,14 +60,18 @@ export class VelocityIntegrator {
         strideLengthSigned: 0,
         clearance: 0,
         velocity: [],
+        velocityPreDriftCorrection: [],
         displacement: [],
         verticalVelocity: [],
         verticalDisplacement: [],
       };
     }
 
-    let velocity = trapezoidalIntegrate(swingHoriz, dt);
-    velocity = this.correctDrift(velocity);
+    // เก็บ velocity "ก่อน" correctDrift ไว้ด้วย — correctDrift บังคับ v=0 ที่ปลายทั้งสอง
+    // เสมอโดยนิยาม จึงใช้ velocity หลัง correction ตรวจสอบสมมติฐาน ZUPT (ปลาย window
+    // นิ่งจริงไหม) ไม่ได้ ต้องดูค่าก่อนแก้เพื่อรู้ว่าปลายเบี่ยงจาก 0 มากแค่ไหนก่อนถูกบังคับทิ้ง
+    const velocityPreDriftCorrection = trapezoidalIntegrate(swingHoriz, dt);
+    const velocity = this.correctDrift(velocityPreDriftCorrection);
     const displacement = trapezoidalIntegrate(velocity, dt);
 
     let verticalVelocity = trapezoidalIntegrate(swingVert, dt);
@@ -90,6 +95,7 @@ export class VelocityIntegrator {
       strideLengthSigned: signedDisplacement,
       clearance,
       velocity,
+      velocityPreDriftCorrection,
       displacement,
       verticalVelocity,
       verticalDisplacement,

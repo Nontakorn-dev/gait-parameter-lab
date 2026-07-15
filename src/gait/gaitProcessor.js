@@ -516,6 +516,7 @@ export class GaitProcessor {
     const strideClampedFlags = [];
     const strideSignedLengths = [];
     const zuptAccelDeviations = [];
+    const velocityPreDriftCorrections = [];
 
     for (const cycle of cycles) {
       // นับทุก cycle ที่ยังไม่เคยนับ (ไม่ใช่แค่ cycle สุดท้าย) เพื่อไม่ให้พลาด
@@ -564,7 +565,12 @@ export class GaitProcessor {
         ? (timestamps[metricEndIdx] - timestamps[metricStartIdx]) / segmentSampleSpan
         : (1.0 / SAMPLE_RATE);
 
-      const { strideLength: integratedStrideLength, strideLengthSigned, clearance } = this.velocityIntegrator.computeStrideMetrics(
+      const {
+        strideLength: integratedStrideLength,
+        strideLengthSigned,
+        clearance,
+        velocityPreDriftCorrection,
+      } = this.velocityIntegrator.computeStrideMetrics(
         cycleAy,
         cycleAz,
         cycleAngles,
@@ -574,6 +580,7 @@ export class GaitProcessor {
           dt: winDt,
         },
       );
+      velocityPreDriftCorrections.push(velocityPreDriftCorrection);
 
       const strideLength = Math.max(
         STRIDE_LENGTH_MIN_M,
@@ -625,6 +632,7 @@ export class GaitProcessor {
     const strideClampedLast = strideClampedFlags[lastIdx] ?? false;
     const strideSignedLast = strideSignedLengths[lastIdx];
     const zuptAccelDeviationLast = zuptAccelDeviations[lastIdx];
+    const velocityPreDriftCorrectionLast = velocityPreDriftCorrections[lastIdx];
     const strideTimeLast = strideTimes[lastIdx];
     const stancePctLast = stancePcts[lastIdx];
     const swingPctLast = swingPcts[lastIdx];
@@ -671,6 +679,9 @@ export class GaitProcessor {
       strideLengthClamped: strideClampedLast,
       strideLengthSignedM: strideSignedLast,
       zuptAccelDeviationG: Number.isFinite(zuptAccelDeviationLast) ? zuptAccelDeviationLast : null,
+      // v ก่อน correctDrift บังคับ v=0 ที่ปลาย window — ไว้ตรวจว่า ZUPT ถูกวางในจุดที่นิ่งจริงไหม
+      // (ดู zuptAccelDeviationG คู่กัน: ‖accel‖ ใกล้ 1g ที่ปลาย window ควรคู่กับ v ก่อนแก้ใกล้ 0)
+      velocityPreDriftCorrectionMps: velocityPreDriftCorrectionLast ?? [],
       clearance: clearanceLast,
       cadence,
       strideTime: strideTimeLast,
@@ -697,6 +708,9 @@ export class GaitProcessor {
       integrationEndTimestampS: lastIntegrationWindow?.endTime ?? null,
       integrationAngularVelocityThresholdDps: lastIntegrationWindow?.threshold ?? null,
       integrationSource: lastIntegrationWindow?.source ?? null,
+      // alias ของ integrationSource ไว้อ่านคู่กับ velocityPreDriftCorrectionMps โดยตรง
+      // (บอกว่า window ที่ velocity array นี้ครอบมาจาก heuristic ไหนใน findStepIntegrationWindow)
+      windowSource: lastIntegrationWindow?.source ?? null,
       cycleKey: cycleStartSampleId !== null ? String(cycleStartSampleId) : `${cycleStartTimestampMs ?? Date.now()}`,
       side: cycleStartSample?.side ?? null,
       sensorName: cycleStartSample?.sensorName ?? null,
