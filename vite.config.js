@@ -1,4 +1,5 @@
 import { defineConfig } from 'vite';
+import { resolve } from 'node:path';
 
 export default defineConfig({
   server: {
@@ -6,5 +7,13 @@ export default defineConfig({
     // Web Bluetooth requires a secure context (HTTPS) on real devices/phones.
     // On localhost, Chrome treats it as secure automatically.
     host: true,
+  },
+  build: {
+    rollupOptions: {
+      input: {
+        main: resolve(__dirname, 'index.html'),
+        debug: resolve(__dirname, 'debug/index.html'),
+      },
+    },
   },
 });

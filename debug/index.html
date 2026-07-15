@@ -1,0 +1,42 @@
+<!doctype html>
+<html lang="th">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Swing Test / Axis Debug — Gait Lab</title>
+</head>
+<body>
+  <header class="debug-header">
+    <div>
+      <h1>Swing Test / Axis Debug</h1>
+      <p class="debug-sub">Raw 6-axis (ก่อน remap) — ตรวจ sagittal axis (ท่า 1) และ polarity L/R (ท่า 2)</p>
+    </div>
+    <div class="debug-controls">
+      <button class="btn primary" id="debug-connect" type="button">Connect Sensors</button>
+      <button class="btn" id="debug-demo" type="button">Demo</button>
+      <button class="btn" id="debug-reset" type="button">Reset Peaks</button>
+      <button class="btn" id="debug-record" type="button">● Record</button>
+      <button class="btn" id="debug-export" type="button">Export</button>
+      <a class="btn link" href="/">← Main</a>
+    </div>
+  </header>
+
+  <div class="debug-status" id="debug-status">Loading…</div>
+
+  <main class="debug-main">
+    <section class="debug-guide">
+      <b>วิธีทำ:</b>
+      <ol>
+        <li>ติดเซนเซอร์ที่หน้าแข้งทั้งสองข้าง ยึดแน่น → กด <b>Connect Sensors</b></li>
+        <li><b>ท่า 1:</b> แกว่งขาหน้า-หลังช้า ๆ ข้างละ 3–4 ครั้ง → แกน gyro ที่ peak สูงสุด (★) ต้องเป็น <b>gx</b></li>
+        <li>กด <b>Reset Peaks</b> → <b>ท่า 2:</b> แกว่ง<b>ไปข้างหน้า</b> ทั้งสองข้าง → sign ของแกน sagittal ต้องเหมือนกัน</li>
+      </ol>
+    </section>
+
+    <div class="debug-sensors" id="debug-sensors"></div>
+    <div id="debug-verdict"></div>
+  </main>
+
+  <script type="module" src="/src/debug/main.js"></script>
+</body>
+</html>
