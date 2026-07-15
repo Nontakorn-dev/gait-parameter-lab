@@ -642,10 +642,14 @@ export class GaitProcessor {
         cycles,
         integrationWindow: null,
       };
+      // drain ครั้งเดียวก่อน forEach — ถ้าเรียกในตัว callback เอง listener ตัวแรกจะกวาด
+      // array ไปหมด listener ที่เหลือได้ [] เงียบ ๆ โดยไม่มี error ใด ๆ (พังก็ต่อเมื่อมี
+      // listener ตัวที่สองเข้ามา ซึ่งตอนนี้ยังไม่มีจึงไม่เคยเห็นอาการ)
+      const diagnostics = this._drainCycleDiagnostics();
       this.paramListeners.forEach((callback) => callback({
         params: null,
         processedData: this.processedData,
-        newCycleDiagnostics: this._drainCycleDiagnostics(),
+        newCycleDiagnostics: diagnostics,
       }));
       return;
     }
@@ -753,10 +757,12 @@ export class GaitProcessor {
       integrationWindow: lastIntegrationWindow,
     };
 
+    // drain ครั้งเดียวก่อน forEach (ดูคอมเมนต์ที่ early-return ด้านบน — เหตุผลเดียวกัน)
+    const diagnostics = this._drainCycleDiagnostics();
     this.paramListeners.forEach((callback) => callback({
       params: this.latestParams,
       processedData: this.processedData,
-      newCycleDiagnostics: this._drainCycleDiagnostics(),
+      newCycleDiagnostics: diagnostics,
     }));
   }
 

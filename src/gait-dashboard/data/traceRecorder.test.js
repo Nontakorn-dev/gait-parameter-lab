@@ -221,13 +221,35 @@ test('recordCycle เก็บได้ทุก cycle ไม่ใช่แค�
   assert.deepEqual(trace.cycles.map((c) => c.cycleKey), ['1', '2', '3']);
 });
 
-test('recordCycle หยุดรับที่ maxCycles (ไม่โตไม่จำกัด)', () => {
+test('recordCycle หยุดรับที่ maxCycles (ไม่โตไม่จำกัด) และ mark cyclesTruncated (ไม่ตัดข้อมูลเงียบ)', () => {
   const rec = new TraceRecorder({ maxCycles: 3 });
   rec.start();
+  assert.equal(rec.isCyclesTruncated(), false);
   for (let i = 0; i < 10; i += 1) {
     rec.recordCycle(cycleDiagnostic({ cycleKey: String(i) }));
   }
   assert.equal(rec.cycleCount(), 3, 'ต้องไม่เกิน cap');
+  assert.equal(rec.isCyclesTruncated(), true, 'ต้อง flag ว่าข้อมูลถูกตัด เหมือน record()/truncated');
+  assert.equal(rec.isRecording(), true, 'ต่างจาก sample cap: cycle cap ไม่ควรหยุด recording ทั้งหมด (raw sample ยังมีค่า)');
+  assert.equal(rec.buildTrace().cyclesTruncated, true);
+});
+
+test('cyclesTruncated เป็น false เมื่อไม่ชน cap', () => {
+  const rec = new TraceRecorder();
+  rec.start();
+  rec.recordCycle(cycleDiagnostic());
+  assert.equal(rec.isCyclesTruncated(), false);
+  assert.equal(rec.buildTrace().cyclesTruncated, false);
+});
+
+test('start() รีเซ็ต cyclesTruncated', () => {
+  const rec = new TraceRecorder({ maxCycles: 1 });
+  rec.start();
+  rec.recordCycle(cycleDiagnostic());
+  rec.recordCycle(cycleDiagnostic()); // ชน cap
+  assert.equal(rec.isCyclesTruncated(), true);
+  rec.start();
+  assert.equal(rec.isCyclesTruncated(), false, 'session ใหม่ต้องเริ่มสะอาด');
 });
 
 test('start() ล้าง cycles เดิม', () => {

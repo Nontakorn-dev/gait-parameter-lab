@@ -150,6 +150,25 @@ test('newCycleDiagnostics: dedup — analyze() ซ้ำโดยไม่มี
   assert.equal(secondBatch.length, 0, 'ไม่ควรมี cycle "ใหม่" เพราะ buffer ไม่เปลี่ยน');
 });
 
+test('regression: หลาย listener ต้องได้ newCycleDiagnostics ชุดเดียวกันเท่ากันทุกตัว (ไม่ใช่ตัวแรกได้ ตัวหลัง [])', () => {
+  const proc = new GaitProcessor();
+  const { samples } = generateWalkingData({ numStrides: 12, strideTime: 1.05 });
+  const t0 = Date.now();
+  for (const s of samples) {
+    proc.addSample({ ...s, timestampMs: t0 + Math.round(s.timestamp * 1000) });
+  }
+
+  let listener1Count = null;
+  let listener2Count = null;
+  proc.onParams(({ newCycleDiagnostics }) => { listener1Count = newCycleDiagnostics?.length ?? -1; });
+  proc.onParams(({ newCycleDiagnostics }) => { listener2Count = newCycleDiagnostics?.length ?? -1; });
+  proc.analyze();
+
+  assert.ok(listener1Count > 0, `listener แรกต้องได้ cycle ได้ ${listener1Count}`);
+  assert.equal(listener2Count, listener1Count,
+    `listener ที่สองต้องได้เท่ากับตัวแรก (${listener1Count}) ไม่ใช่ 0 จากการ drain ซ้ำ`);
+});
+
 test('newCycleDiagnostics: สะสมข้าม streaming ครบเท่ากับ totalStrideCount (ไม่หาย ไม่ซ้ำ)', () => {
   const { allDiagnostics, totalStrideCount } = runStreaming({ numStrides: 15, strideTime: 1.05 });
   assert.equal(allDiagnostics.length, totalStrideCount,

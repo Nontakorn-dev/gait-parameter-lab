@@ -35,6 +35,7 @@ export class TraceRecorder {
     this.startedAt = null;
     this.packetVersionBySensor = {};
     this.truncated = false;
+    this.cyclesTruncated = false;
   }
 
   isRecording() {
@@ -53,6 +54,10 @@ export class TraceRecorder {
     return this.truncated;
   }
 
+  isCyclesTruncated() {
+    return this.cyclesTruncated;
+  }
+
   start() {
     this.recording = true;
     this.samples = [];
@@ -60,6 +65,7 @@ export class TraceRecorder {
     this.startedAt = Date.now();
     this.packetVersionBySensor = {};
     this.truncated = false;
+    this.cyclesTruncated = false;
   }
 
   stop() {
@@ -107,7 +113,11 @@ export class TraceRecorder {
     if (!this.recording || !cycleDiagnostic) {
       return;
     }
+    // เดินเกินระยะ cap (>5 ชม. ต่อเนื่อง) ไม่น่าเกิด แต่ mark ไว้เหมือน record() แทนที่จะ
+    // ทิ้ง cycle เงียบ ๆ — สอดคล้องปรัชญา "ไม่ตัดข้อมูลแบบเงียบ" เดียวกับ strideLengthClamped.
+    // ไม่หยุด recording ทั้งหมดเหมือน record() เพราะ raw sample ยังมีค่าต่อให้ cycle cap แล้ว
     if (this.cycles.length >= this.maxCycles) {
+      this.cyclesTruncated = true;
       return;
     }
     this.cycles.push(cycleDiagnostic);
@@ -215,6 +225,7 @@ export class TraceRecorder {
       source: hasSensorFrameRaw ? 'live' : 'demo-or-no-sensor',
       hasSensorFrameRaw,
       truncated: this.truncated,
+      cyclesTruncated: this.cyclesTruncated,
       sampleRateHzNominal: this.sampleRateHzNominal,
       sampleRateHzMeasured: measuredRates.overall,
       sampleRateHzBySensor: measuredRates.bySensor,
