@@ -99,7 +99,8 @@ function decodePacket(buffer) {
     ],
     timestamp_ms: dataView.getUint32(5, true) / 1000,
     seq: dataView.getUint16(3, true),
-    version: dataView.getUint8(2),
+    // offset 2 = IMU packet format version (hardcoded 1 ในเฟิร์มแวร์) ไม่ใช่เวอร์ชันเฟิร์มแวร์
+    packetVersion: dataView.getUint8(2),
   }
 }
 
@@ -615,10 +616,10 @@ class BrowserBleManager {
             timestamp_ms: decoded.timestamp_ms,
             raw_accel: canonical.accel,
             raw_gyro: canonical.gyro,
-            // raw ก่อน remap (sensor frame) + firmware version สำหรับ trace export/offline reprocess
+            // raw ก่อน remap (sensor frame) + packet version สำหรับ trace export/offline reprocess
             raw_accel_sensor: decoded.raw_accel,
             raw_gyro_sensor: decoded.raw_gyro,
-            firmware_version: decoded.version,
+            packet_version: decoded.packetVersion,
             seq: decoded.seq,
           },
         })

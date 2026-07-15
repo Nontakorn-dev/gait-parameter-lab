@@ -178,7 +178,7 @@ export class GaitLabDashboardApp {
     this.calibrationTimer = null;
     this.calibrationProgressTimer = null;
     this.pendingShankLengthM = estimateShankLengthM();
-    this.traceRecorder = new TraceRecorder({ sampleRateHz: 100 });
+    this.traceRecorder = new TraceRecorder({ sampleRateHzNominal: 100 });
   }
 
   init() {
@@ -675,13 +675,44 @@ export class GaitLabDashboardApp {
       return;
     }
 
+    const groundTruth = this._promptGroundTruth();
+    if (groundTruth === null) {
+      return; // ผู้ใช้กด cancel
+    }
+
     const profiles = readGaitCalibrationProfiles();
     const trace = this.traceRecorder.buildTrace({
       axisMap: getActiveAxisMap(),
       calibrationBySensor: profiles.bySensorKey || {},
       appVersion: '1.0.0',
+      firmwareBuildTag: groundTruth.firmwareBuildTag,
+      groundTruth: {
+        distanceM: groundTruth.distanceM,
+        stepCountManual: groundTruth.stepCountManual,
+        notes: groundTruth.notes,
+      },
     });
     downloadTraceJson(trace, buildTraceFilename());
+  }
+
+  // เก็บ ground truth ตอน export เพื่อไม่ให้ต้องจดใส่กระดาษแยก (แล้วหาย = trace ใช้ validate ไม่ได้)
+  _promptGroundTruth() {
+    const distanceStr = window.prompt?.('ระยะที่วัดจริง (เมตร)? เช่น 10 — เว้นว่างได้ถ้าไม่มี', '10');
+    if (distanceStr === null) {
+      return null;
+    }
+    const stepStr = window.prompt?.('นับก้าวเองได้กี่ก้าว? (validate step count ฟรี) — เว้นว่างได้', '') ?? '';
+    const buildTag = window.prompt?.('Firmware build tag? เช่น dlpf24-rb64 — เว้นว่างได้', '') ?? '';
+    const notes = window.prompt?.('หมายเหตุ (พื้นผิว/ความเร็ว/ผู้เดิน)? — เว้นว่างได้', '') ?? '';
+
+    const distanceM = Number.parseFloat(distanceStr);
+    const stepCountManual = Number.parseInt(stepStr, 10);
+    return {
+      distanceM: Number.isFinite(distanceM) ? distanceM : null,
+      stepCountManual: Number.isFinite(stepCountManual) ? stepCountManual : null,
+      firmwareBuildTag: buildTag.trim() || null,
+      notes: notes.trim() || null,
+    };
   }
 
   _updateTraceRecordingUi() {

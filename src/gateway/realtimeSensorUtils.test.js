@@ -71,24 +71,24 @@ test('concern#2: demo-style canonical sample (side R) ผ่าน normalize ไ
   assert.deepEqual(out.raw_gyro, [4, 5, 6]);
 });
 
-test('trace fields: pre-remap raw + seq + firmware ผ่าน normalize และรอด double-normalize', () => {
+test('trace fields: pre-remap raw + seq + packet version ผ่าน normalize และรอด double-normalize', () => {
   const payload = {
     ...makePayload('R'),
     raw_accel_sensor: [111, 222, 333],
     raw_gyro_sensor: [11, 22, 33],
-    firmware_version: 1,
+    packet_version: 1,
     seq: 42,
   };
   const once = normalizeRealtimeSensorSample(payload);
   assert.deepEqual(once.rawAccelSensor, [111, 222, 333]);
   assert.deepEqual(once.rawGyroSensor, [11, 22, 33]);
-  assert.equal(once.firmwareVersion, 1);
+  assert.equal(once.packetVersion, 1);
   assert.equal(once.seq, 42);
 
   // normalize รอบสอง (BLE path เรียกซ้ำ) ต้องไม่ทำ field หาย
   const twice = normalizeRealtimeSensorSample(once);
   assert.deepEqual(twice.rawAccelSensor, [111, 222, 333]);
   assert.deepEqual(twice.rawGyroSensor, [11, 22, 33]);
-  assert.equal(twice.firmwareVersion, 1);
+  assert.equal(twice.packetVersion, 1);
   assert.equal(twice.seq, 42);
 });

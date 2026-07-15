@@ -171,7 +171,7 @@ export function normalizeRealtimeSensorSample(payload) {
     raw_gyro: [normalized.gx, normalized.gy, normalized.gz],
     rawAccelSensor: readArrayField(payload, 'raw_accel_sensor', 'rawAccelSensor'),
     rawGyroSensor: readArrayField(payload, 'raw_gyro_sensor', 'rawGyroSensor'),
-    firmwareVersion: toFiniteNumber(payload?.firmware_version ?? payload?.firmwareVersion),
+    packetVersion: toFiniteNumber(payload?.packet_version ?? payload?.packetVersion),
     seq: toFiniteNumber(payload?.seq),
   }
 }
