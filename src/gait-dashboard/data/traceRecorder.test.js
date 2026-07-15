@@ -122,6 +122,55 @@ test('จุดเล็ก#2: trace ไม่มี sensor-frame raw = ตี�
   assert.equal(trace.source, 'demo-or-no-sensor');
 });
 
+test('dropped จาก seq gap: median rate มองไม่เห็น แต่ seq gap เห็น', () => {
+  const rec = new TraceRecorder({ sampleRateHzNominal: 100 });
+  rec.start();
+  // ดรอป seq ที่ %6===5 (5,11,...,59 = 10 ตัว); จบที่ seq 60 ที่เก็บไว้ เพื่อให้ทุก drop มีตัวถัดมา
+  let t = 1000;
+  for (let seq = 0; seq <= 60; seq += 1) {
+    if (seq % 6 === 5) { t += 10; continue; } // ดรอป seq นี้ (timestamp เดินตามจริง เกิด gap 20ms)
+    rec.record(sensorSample({ seq, timestampMs: t }));
+    t += 10;
+  }
+  const trace = rec.buildTrace();
+  // median rate ยังใกล้ 100 (ไม่เผย drop)
+  assert.ok(Math.abs(trace.sampleRateHzMeasured - 100) < 1, `measured=${trace.sampleRateHzMeasured}`);
+  // แต่ seq gap เผย drop
+  assert.equal(trace.droppedBySensor.DernDee_R_Shank, 10, 'ต้องนับ drop ได้ 10');
+});
+
+test('seq wrap ที่ 65535 ไม่นับเป็น drop', () => {
+  const rec = new TraceRecorder();
+  rec.start();
+  for (const seq of [65533, 65534, 65535, 0, 1, 2]) {
+    rec.record(sensorSample({ seq }));
+  }
+  assert.equal(rec.countSeqGaps().dropped.DernDee_R_Shank, 0);
+});
+
+test('seq กระโดดถอย (firmware reset) = discontinuity ไม่ใช่ drop', () => {
+  const rec = new TraceRecorder();
+  rec.start();
+  for (const seq of [5000, 5001, 5002, 0, 1, 2]) { // reconnect → seq reset เป็น 0
+    rec.record(sensorSample({ seq }));
+  }
+  const gaps = rec.countSeqGaps();
+  assert.equal(gaps.dropped.DernDee_R_Shank, 0, 'ไม่นับเป็น drop มหาศาล');
+  assert.equal(gaps.discontinuities.DernDee_R_Shank, 1);
+});
+
+test('seq gap แยกต่อเซนเซอร์', () => {
+  const rec = new TraceRecorder();
+  rec.start();
+  rec.record(sensorSample({ sensorKey: 'L', seq: 0 }));
+  rec.record(sensorSample({ sensorKey: 'R', seq: 0 }));
+  rec.record(sensorSample({ sensorKey: 'L', seq: 1 }));       // L ต่อเนื่อง
+  rec.record(sensorSample({ sensorKey: 'R', seq: 3 }));       // R ดรอป 2
+  const dropped = rec.countSeqGaps().dropped;
+  assert.equal(dropped.L, 0);
+  assert.equal(dropped.R, 2);
+});
+
 test('buildTraceFilename มีรูปแบบ timestamp', () => {
   const name = buildTraceFilename(new Date('2026-07-15T09:08:07'));
   assert.equal(name, 'gait-trace-20260715-090807.json');

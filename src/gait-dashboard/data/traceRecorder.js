@@ -18,6 +18,10 @@ function median(values) {
   return sorted.length % 2 === 0 ? (sorted[mid - 1] + sorted[mid]) / 2 : sorted[mid];
 }
 
+const SEQ_WRAP = 65536; // seq เป็น uint16 (firmware g_nextSeq) wrap ทุก ~10.9 นาที @100Hz
+// gap ใหญ่กว่านี้ถือเป็น discontinuity (firmware reset/reconnect) ไม่ใช่ packet drop ปกติ
+const SEQ_DROP_GAP_MAX = 2000;
+
 export class TraceRecorder {
   constructor({ sampleRateHzNominal = 100, maxSamples = 300000 } = {}) {
     this.sampleRateHzNominal = sampleRateHzNominal;
@@ -127,6 +131,45 @@ export class TraceRecorder {
     return this.samples.some((s) => Array.isArray(s.raw_accel_sensor));
   }
 
+  // นับ dropped sample จาก seq gap ต่อเซนเซอร์ (measured rate มองไม่เห็น drop เพราะ median
+  // ทนต่อ outlier). จัดการ wrap ที่ 65535; gap ใหญ่ผิดปกติ = reset/reconnect นับแยกเป็น
+  // discontinuity ไม่ปนกับ dropped
+  countSeqGaps() {
+    const seqBySensor = new Map();
+    for (const s of this.samples) {
+      if (!Number.isFinite(s.seq)) {
+        continue;
+      }
+      const key = s.sensorKey ?? '_';
+      if (!seqBySensor.has(key)) {
+        seqBySensor.set(key, []);
+      }
+      seqBySensor.get(key).push(s.seq);
+    }
+
+    const dropped = {};
+    const discontinuities = {};
+    for (const [key, seqs] of seqBySensor) {
+      let drop = 0;
+      let disc = 0;
+      for (let i = 1; i < seqs.length; i += 1) {
+        const gap = (((seqs[i] - seqs[i - 1]) % SEQ_WRAP) + SEQ_WRAP) % SEQ_WRAP;
+        if (gap <= 1) {
+          continue; // 0 = duplicate, 1 = ต่อเนื่องปกติ
+        }
+        if (gap <= SEQ_DROP_GAP_MAX) {
+          drop += gap - 1;
+        } else {
+          disc += 1; // seq ถอย/กระโดดไกล = reset/reconnect ไม่ใช่ drop
+        }
+      }
+      dropped[key] = drop;
+      discontinuities[key] = disc;
+    }
+
+    return { dropped, discontinuities };
+  }
+
   buildTrace({
     axisMap = null,
     calibrationBySensor = {},
@@ -135,6 +178,7 @@ export class TraceRecorder {
     groundTruth = null,
   } = {}) {
     const measuredRates = this.measureSampleRates();
+    const seqGaps = this.countSeqGaps();
     const hasSensorFrameRaw = this.hasSensorFrameRaw();
 
     return {
@@ -152,6 +196,9 @@ export class TraceRecorder {
       sampleRateHzNominal: this.sampleRateHzNominal,
       sampleRateHzMeasured: measuredRates.overall,
       sampleRateHzBySensor: measuredRates.bySensor,
+      // dropped จาก seq gap (measured rate มองไม่เห็น drop); discontinuity = reset/reconnect
+      droppedBySensor: seqGaps.dropped,
+      seqDiscontinuitiesBySensor: seqGaps.discontinuities,
       sampleCount: this.samples.length,
       axisMap,
       packetVersionBySensor: { ...this.packetVersionBySensor },

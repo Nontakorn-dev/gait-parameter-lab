@@ -657,6 +657,7 @@ export class GaitLabDashboardApp {
   }
 
   startTraceRecording() {
+    this._truncationAlerted = false;
     this.traceRecorder.start();
     this._setRecordButtonState(true, 0);
   }
@@ -716,9 +717,21 @@ export class GaitLabDashboardApp {
   }
 
   _updateTraceRecordingUi() {
+    const count = this.traceRecorder.sampleCount();
+
+    // ชน cap แล้ว record() ตั้ง recording=false — ปุ่มต้องสะท้อนสถานะจริง ไม่ค้างที่ "Stop"
+    if (!this.traceRecorder.isRecording()) {
+      this._setRecordButtonState(false, count);
+      if (this.traceRecorder.isTruncated() && !this._truncationAlerted) {
+        this._truncationAlerted = true;
+        window.alert?.(`Recording stopped: reached the ${count}-sample cap. Export the trace now.`);
+      }
+      return;
+    }
+
     // อัปเดต DOM แบบ throttle กัน thrash ที่ 100Hz
-    if (this.traceRecorder.sampleCount() % 25 === 0) {
-      this._setRecordButtonState(true, this.traceRecorder.sampleCount());
+    if (count % 25 === 0) {
+      this._setRecordButtonState(true, count);
     }
   }
 
