@@ -133,8 +133,22 @@ body {
 .debug-table td.val, .debug-table td.peak { text-align: right; font-family: ui-monospace, monospace; }
 .debug-table td.unit { color: var(--muted); font-size: 0.72rem; }
 .debug-table td.peak { color: var(--muted); }
+.debug-table td.peak.pos { color: var(--pos); }
+.debug-table td.peak.neg { color: var(--neg); }
 .debug-table tr.sagittal { background: rgba(56,189,248,0.08); }
 .debug-table tr.sagittal td.axis { color: var(--pos); font-weight: 700; }
+
+.verdict-table { margin: 4px 0 12px; }
+.verdict-table td { padding: 6px 10px; }
+.side-badge.sm { width: 20px; height: 20px; font-size: 0.7rem; }
+.debug-warn {
+  margin: 10px 0 0;
+  color: var(--pend);
+  font-size: 0.8rem;
+  background: rgba(245,158,11,0.1);
+  padding: 8px 12px;
+  border-radius: 8px;
+}
 
 .val.pos { color: var(--pos); }
 .val.neg { color: var(--neg); }

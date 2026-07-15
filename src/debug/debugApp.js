@@ -2,8 +2,12 @@ import {
   createRealtimeConnection,
   connectBrowserBleDevice,
 } from '../gateway/realtimeTransport.js';
-import { normalizeRealtimeSensorSample } from '../gateway/realtimeSensorUtils.js';
+import {
+  normalizeRealtimeSensorSample,
+  getActiveAxisMap,
+} from '../gateway/realtimeSensorUtils.js';
 import { rawAccelToG, rawGyroToDps } from '../gait/signalUtils.js';
+import { readGaitCalibrationProfiles } from '../gait/gaitCalibrationStore.js';
 import { generateWalkingData } from '../gait-dashboard/data/demoDataGenerator.js';
 import {
   TraceRecorder,
@@ -32,36 +36,29 @@ export function detectSagittalAxis(peakAbs = {}) {
   return { axis, value: value === -Infinity ? 0 : value, isCorrect: axis === 'gx' };
 }
 
-// ท่าที่ 2: ตอนแกว่งไปหน้า sign ของแกน sagittal ต้องเหมือนกันทั้งซ้าย/ขวา
-export function polarityVerdict(leftSigned, rightSigned) {
-  if (!Number.isFinite(leftSigned) || !Number.isFinite(rightSigned)) {
-    return { ok: null, message: 'แกว่งขาทั้งสองข้างก่อน' };
+// |ค่า| peak ต่อแกนจาก peak บวก/ลบ (ใช้หาแกน sagittal)
+export function peakAbsFrom(peakPos = {}, peakNeg = {}) {
+  const out = {};
+  for (const axis of [...ACCEL_AXES, ...GYRO_AXES]) {
+    out[axis] = Math.max(Math.abs(peakPos[axis] || 0), Math.abs(peakNeg[axis] || 0));
   }
-  const leftSign = Math.sign(leftSigned);
-  const rightSign = Math.sign(rightSigned);
-  if (leftSign === 0 || rightSign === 0) {
-    return { ok: null, message: 'สัญญาณยังน้อย — แกว่งแรงขึ้น' };
-  }
-  const same = leftSign === rightSign;
-  return {
-    ok: same,
-    leftSign,
-    rightSign,
-    message: same
-      ? 'polarity เหมือนกันทั้งสองข้าง ✅'
-      : 'mirror mounting — ต้อง flip sign ข้างหนึ่งใน AXIS_MAP ❌',
-  };
+  return out;
+}
+
+function emptyAxisMap(value = 0) {
+  return { ax: value, ay: value, az: value, gx: value, gy: value, gz: value };
 }
 
 function emptyTracker(sensorKey, side, label) {
-  const zero = () => ({ ax: 0, ay: 0, az: 0, gx: 0, gy: 0, gz: 0 });
   return {
     sensorKey,
     side: side || null,
     label: label || sensorKey,
-    latest: zero(),
-    peakAbs: zero(),
-    peakSignedGyro: { gx: null, gy: null, gz: null },
+    latest: emptyAxisMap(),
+    // เก็บ peak บวกและลบ "แยกกัน" ต่อแกน — การแกว่งมีทั้งจังหวะไปหน้า(+) และดีดกลับ(−)
+    // การเก็บ signed peak รวมเดียวจะจับคนละจังหวะกันแต่ละข้าง = false mirror alarm
+    peakPos: emptyAxisMap(0),
+    peakNeg: emptyAxisMap(0),
     usingPreRemap: false,
     sampleCount: 0,
   };
@@ -96,16 +93,12 @@ export function updateTracker(tracker, sample) {
   tracker.sampleCount += 1;
 
   for (const axis of [...ACCEL_AXES, ...GYRO_AXES]) {
-    const magnitude = Math.abs(values[axis]);
-    if (magnitude > tracker.peakAbs[axis]) {
-      tracker.peakAbs[axis] = magnitude;
+    const value = values[axis];
+    if (value > tracker.peakPos[axis]) {
+      tracker.peakPos[axis] = value;
     }
-  }
-  // เก็บ signed value ของแกน gyro ณ จุดที่ |ค่า| มากสุด (ไว้เช็ค polarity)
-  for (const axis of GYRO_AXES) {
-    const current = tracker.peakSignedGyro[axis];
-    if (current === null || Math.abs(values[axis]) > Math.abs(current)) {
-      tracker.peakSignedGyro[axis] = values[axis];
+    if (value < tracker.peakNeg[axis]) {
+      tracker.peakNeg[axis] = value;
     }
   }
   return tracker;
@@ -220,10 +213,10 @@ export class DebugApp {
 
   resetPeaks() {
     for (const tracker of this.trackers.values()) {
-      tracker.peakAbs = { ax: 0, ay: 0, az: 0, gx: 0, gy: 0, gz: 0 };
-      tracker.peakSignedGyro = { gx: null, gy: null, gz: null };
+      tracker.peakPos = emptyAxisMap(0);
+      tracker.peakNeg = emptyAxisMap(0);
     }
-    this._setStatus('Peaks reset. Do one clean forward swing per side.');
+    this._setStatus('Peaks reset. Swing forward and read the live sign on both sides.');
   }
 
   toggleRecording() {
@@ -250,7 +243,15 @@ export class DebugApp {
       window.alert?.('No trace recorded yet.');
       return;
     }
-    const trace = this.traceRecorder.buildTrace({ appVersion: '1.0.0-debug' });
+    // ใส่ header ให้ครบเหมือน export หลัก (axis map + gyro bias) เผื่อ reprocess
+    // แต่ mark ว่าเป็น swing-test ไม่ใช่ trace เดิน 10 เมตร (ไม่มี groundTruth ระยะจริง)
+    const profiles = readGaitCalibrationProfiles();
+    const trace = this.traceRecorder.buildTrace({
+      axisMap: getActiveAxisMap(),
+      calibrationBySensor: profiles.bySensorKey || {},
+      appVersion: '1.0.0-debug',
+      groundTruth: { notes: 'swing-test / axis-check — NOT a 10m validation walk' },
+    });
     downloadTraceJson(trace, buildTraceFilename());
   }
 
@@ -273,16 +274,17 @@ export class DebugApp {
   }
 
   _renderSensor(tracker) {
-    const sagittal = detectSagittalAxis(tracker.peakAbs);
+    const peakAbs = peakAbsFrom(tracker.peakPos, tracker.peakNeg);
+    const sagittal = detectSagittalAxis(peakAbs);
     const row = (axis, unit) => {
       const value = tracker.latest[axis];
-      const peak = tracker.peakAbs[axis];
       const isSagittal = axis === sagittal.axis && GYRO_AXES.includes(axis);
       const sign = value > 0 ? 'pos' : value < 0 ? 'neg' : 'zero';
       return `<tr class="${isSagittal ? 'sagittal' : ''}">
         <td class="axis">${axis}${isSagittal ? ' ★' : ''}</td>
         <td class="val ${sign}">${value.toFixed(1)}</td>
-        <td class="peak">${peak.toFixed(1)}</td>
+        <td class="peak pos">+${tracker.peakPos[axis].toFixed(1)}</td>
+        <td class="peak neg">${tracker.peakNeg[axis].toFixed(1)}</td>
         <td class="unit">${unit}</td>
       </tr>`;
     };
@@ -303,7 +305,7 @@ export class DebugApp {
         &nbsp;— peak ${sagittal.value.toFixed(0)}°/s
       </div>
       <table class="debug-table">
-        <thead><tr><th>axis</th><th>live</th><th>peak|·|</th><th></th></tr></thead>
+        <thead><tr><th>axis</th><th>live</th><th>peak+</th><th>peak−</th><th></th></tr></thead>
         <tbody>
           ${ACCEL_AXES.map((a) => row(a, 'g')).join('')}
           ${GYRO_AXES.map((a) => row(a, '°/s')).join('')}
@@ -319,20 +321,33 @@ export class DebugApp {
       return '<div class="verdict-note">ต่อทั้งสองข้าง (L และ R) เพื่อเช็ค polarity (ท่าที่ 2)</div>';
     }
 
-    const leftSag = detectSagittalAxis(left.peakAbs);
-    const rightSag = detectSagittalAxis(right.peakAbs);
-    const leftSigned = left.peakSignedGyro[leftSag.axis];
-    const rightSigned = right.peakSignedGyro[rightSag.axis];
-    const verdict = polarityVerdict(leftSigned, rightSigned);
+    // ไม่ auto-ตัดสิน mirror จาก peak เดียว (peak มีทั้ง +/− ทุกข้าง แยก mirror ไม่ได้จริง)
+    // โชว์ peak+ / peak− และ live ของแกน sagittal ให้คนอ่าน "ตอนแกว่งไปหน้า" เทียบ sign เอง
+    const row = (tracker) => {
+      const sag = detectSagittalAxis(peakAbsFrom(tracker.peakPos, tracker.peakNeg));
+      const axis = sag.axis;
+      const live = tracker.latest[axis];
+      const liveSign = live > 0 ? 'pos' : live < 0 ? 'neg' : 'zero';
+      return `<tr>
+        <td><span class="side-badge sm ${tracker.side === 'L' ? 'left' : 'right'}">${tracker.side}</span></td>
+        <td class="axis">${axis}</td>
+        <td class="val ${liveSign}">${live.toFixed(0)}</td>
+        <td class="peak pos">+${tracker.peakPos[axis].toFixed(0)}</td>
+        <td class="peak neg">${tracker.peakNeg[axis].toFixed(0)}</td>
+      </tr>`;
+    };
 
-    const cls = verdict.ok === true ? 'ok' : verdict.ok === false ? 'bad' : 'pending';
-    const detail = Number.isFinite(leftSigned) && Number.isFinite(rightSigned)
-      ? `L ${leftSag.axis}=${leftSigned.toFixed(0)}°/s, R ${rightSag.axis}=${rightSigned.toFixed(0)}°/s`
-      : '';
-    return `<div class="verdict ${cls}">
-      <div class="verdict-title">ท่าที่ 2 — Polarity check</div>
-      <div class="verdict-msg">${verdict.message}</div>
-      <div class="verdict-detail">${detail}</div>
+    return `<div class="verdict pending">
+      <div class="verdict-title">ท่าที่ 2 — Polarity check (อ่านเอง ไม่ auto-ตัดสิน)</div>
+      <table class="debug-table verdict-table">
+        <thead><tr><th>side</th><th>sagittal</th><th>live °/s</th><th>peak+</th><th>peak−</th></tr></thead>
+        <tbody>${row(left)}${row(right)}</tbody>
+      </table>
+      <div class="verdict-note">
+        แกว่งขา<b>ไปข้างหน้า</b>ทั้งสองข้าง แล้วดู <b>live</b> ของแกน sagittal:
+        ถ้าติดตั้งเหมือนกัน ต้องได้<b>เครื่องหมายเดียวกัน</b>. ถ้าตรงข้าม = mirror ต้อง flip ข้างหนึ่ง.
+        <br>(peak+ และ peak− มีทั้งคู่ทุกข้างเป็นเรื่องปกติ — มีทั้งจังหวะไปหน้าและดีดกลับ อย่าตัดสินจาก peak อย่างเดียว)
+      </div>
     </div>`;
   }
 

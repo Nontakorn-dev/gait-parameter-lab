@@ -3,10 +3,21 @@ import assert from 'node:assert/strict';
 
 import {
   detectSagittalAxis,
-  polarityVerdict,
+  peakAbsFrom,
   extractAxes,
   updateTracker,
 } from './debugApp.js';
+
+function emptyTracker() {
+  const zero = () => ({ ax: 0, ay: 0, az: 0, gx: 0, gy: 0, gz: 0 });
+  return { latest: {}, peakPos: zero(), peakNeg: zero(), usingPreRemap: false, sampleCount: 0 };
+}
+
+function feedGyroX(tracker, dpsSeq) {
+  for (const dps of dpsSeq) {
+    updateTracker(tracker, { rawGyroSensor: [dps * 16.4, 0, 0], rawAccelSensor: [0, 0, 0] });
+  }
+}
 
 test('ท่า 1: detectSagittalAxis คืน gx เมื่อ gx peak สูงสุด (✅)', () => {
   const r = detectSagittalAxis({ gx: 320, gy: 40, gz: 25 });
@@ -20,27 +31,30 @@ test('ท่า 1: ถ้า gz สูงสุด = ติดตั้งหม
   assert.equal(r.isCorrect, false);
 });
 
-test('ท่า 2: polarity เหมือนกัน = ok', () => {
-  const r = polarityVerdict(300, 280);
-  assert.equal(r.ok, true);
+test('peakAbsFrom รวม |peak+| กับ |peak−| เป็น magnitude ต่อแกน', () => {
+  const abs = peakAbsFrom({ gx: 200, gy: 0, gz: 0 }, { gx: -260, gy: 0, gz: 0 });
+  assert.equal(abs.gx, 260, 'ใช้ค่ามากสุดของสองทิศ');
 });
 
-test('ท่า 2: sign ต่างกัน = mirror ต้อง flip', () => {
-  const r = polarityVerdict(300, -280);
-  assert.equal(r.ok, false);
-  assert.equal(r.leftSign, 1);
-  assert.equal(r.rightSign, -1);
-});
+test('regression: เก็บ peak บวก/ลบ แยกกัน — เคสที่เคย false-alarm mirror', () => {
+  // ทั้งสองข้างติดตั้งเหมือนกัน: ไปหน้า(+) แล้วดีดกลับ(−) ที่แรงกว่า
+  const L = emptyTracker();
+  const R = emptyTracker();
+  feedGyroX(L, [0, 200, 0, -260, 0]); // เคยจับ peakSigned = -260 (จังหวะดีดกลับ)
+  feedGyroX(R, [0, 240, 0, -180, 0]); // เคยจับ peakSigned = +240 (จังหวะไปหน้า)
 
-test('ท่า 2: ยังไม่มีสองข้าง = pending (ok=null)', () => {
-  assert.equal(polarityVerdict(300, null).ok, null);
-  assert.equal(polarityVerdict(NaN, 100).ok, null);
+  // ตอนนี้เก็บทั้งสองทิศ ทั้งสองข้างจึงเห็นทั้ง +peak และ −peak (pattern เหมือนกัน)
+  assert.equal(L.peakPos.gx, 200);
+  assert.equal(L.peakNeg.gx, -260);
+  assert.equal(R.peakPos.gx, 240);
+  assert.equal(R.peakNeg.gx, -180);
+  // ไม่มีการ auto-สรุป mirror จาก peak อีกต่อไป (ผู้ใช้อ่าน live เอง)
 });
 
 test('extractAxes ใช้ raw ก่อน remap เมื่อมี (usingPreRemap=true)', () => {
   const sample = {
     rawAccelSensor: [4096, 0, 0], rawGyroSensor: [164, 0, 0],
-    ax: -4096, ay: 0, az: 0, gx: -164, gy: 0, gz: 0, // canonical ต่างค่า (ไม่ควรถูกใช้)
+    ax: -4096, ay: 0, az: 0, gx: -164, gy: 0, gz: 0,
   };
   const { usingPreRemap, values } = extractAxes(sample);
   assert.equal(usingPreRemap, true);
@@ -54,15 +68,10 @@ test('extractAxes fallback เป็น canonical เมื่อไม่มี
   assert.ok(Math.abs(values.gx - 20) < 1e-9);
 });
 
-test('updateTracker เก็บ peak|·| และ signed value ของ gyro ณ จุด peak', () => {
-  const tracker = {
-    latest: {}, peakAbs: { ax: 0, ay: 0, az: 0, gx: 0, gy: 0, gz: 0 },
-    peakSignedGyro: { gx: null, gy: null, gz: null }, sampleCount: 0,
-  };
-  // gx ไต่ขึ้นถึง +300 แล้วลง — peak signed ต้องเป็น +300
-  for (const raw of [82, 1640, 4920, 1640, -820]) { // dps = raw/16.4 → 5,100,300,100,-50
-    updateTracker(tracker, { rawGyroSensor: [raw, 0, 0], rawAccelSensor: [0, 0, 0] });
-  }
-  assert.ok(Math.abs(tracker.peakAbs.gx - 300) < 1e-9);
-  assert.ok(Math.abs(tracker.peakSignedGyro.gx - 300) < 1e-9, 'signed ที่ peak = +300');
+test('updateTracker: sagittal detection ผ่าน peakAbsFrom หลังแกว่ง', () => {
+  const tracker = emptyTracker();
+  feedGyroX(tracker, [0, 100, 300, -250, 0]);
+  const sag = detectSagittalAxis(peakAbsFrom(tracker.peakPos, tracker.peakNeg));
+  assert.equal(sag.axis, 'gx');
+  assert.equal(sag.value, 300);
 });
