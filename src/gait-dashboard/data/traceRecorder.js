@@ -214,7 +214,8 @@ export class TraceRecorder {
     const hasSensorFrameRaw = this.hasSensorFrameRaw();
 
     return {
-      schemaVersion: 2,
+      // v3: เพิ่ม cycles[]/cycleCount/cyclesTruncated — ไฟล์ v2 เก่าไม่มี field พวกนี้เลย
+      schemaVersion: 3,
       recordedAt: this.startedAt ? new Date(this.startedAt).toISOString() : null,
       exportedAt: new Date().toISOString(),
       app: 'gait-parameter-lab',

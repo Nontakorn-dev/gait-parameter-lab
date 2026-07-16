@@ -66,7 +66,7 @@ test('buildTrace: header ครบ (axis map, calibration, packet version, note)
   const calib = { DernDee_R_Shank: { gyroBiasDps: { gx: 0.5, gy: 0, gz: 0 }, shankLengthM: 0.42 } };
   const trace = rec.buildTrace({ axisMap, calibrationBySensor: calib, appVersion: '1.0.0' });
 
-  assert.equal(trace.schemaVersion, 2);
+  assert.equal(trace.schemaVersion, 3);
   assert.equal(trace.sampleRateHzNominal, 100);
   assert.equal(trace.sampleCount, 1);
   assert.deepEqual(trace.axisMap, axisMap);

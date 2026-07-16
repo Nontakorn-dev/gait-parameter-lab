@@ -2,3 +2,6 @@ node_modules/
 dist/
 .DS_Store
 *.log
+
+# personal gait/calibration trace files exported for validation — not repo sample data
+validate/*.json

@@ -1,0 +1,132 @@
+<!doctype html>
+<html lang="th">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Gait Trace Validator</title>
+  <script src="https://cdn.plot.ly/plotly-2.35.2.min.js"></script>
+  <link rel="stylesheet" href="style.css" />
+</head>
+<body>
+  <header class="header">
+    <div class="header__brand">
+      <span class="header__dot"></span>
+      <div>
+        <h1>Gait Trace Validator</h1>
+        <p>อัปโหลดไฟล์ trace ที่ export มา แล้วตรวจสอบ header/ZUPT/ระยะเทียบ ground truth</p>
+      </div>
+    </div>
+    <div class="header__actions">
+      <label class="btn primary">
+        <input type="file" id="fileInput" accept=".json,application/json" hidden />
+        เลือกไฟล์
+      </label>
+      <a class="btn" href="/">← Main</a>
+      <a class="btn" href="/debug/">Swing Test</a>
+    </div>
+  </header>
+
+  <main class="main-container">
+    <section class="dropzone" id="dropzone">
+      <div class="dropzone__inner">
+        <div class="dropzone__icon">📂</div>
+        <p class="dropzone__title">ลากไฟล์ <code>gait-trace-*.json</code> มาวางที่นี่</p>
+        <p class="dropzone__hint">หรือคลิกเพื่อเลือกไฟล์ · รองรับ trace ทั้ง schema v2 (เก่า, ไม่มี cycles) และ v3</p>
+      </div>
+    </section>
+
+    <div id="content" class="content hidden">
+      <div id="warnings"></div>
+
+      <div class="section-grid">
+        <section class="card" id="overviewCard"></section>
+        <section class="card" id="samplingCard"></section>
+      </div>
+
+      <section class="card" id="calibrationCard"></section>
+      <section class="card" id="groundTruthCard"></section>
+
+      <section class="card" id="cyclesCard">
+        <div class="card-header">
+          <span class="card-title">ZUPT / Cycle Diagnostics <span class="card-badge neutral" id="cyclesBadge">—</span></span>
+        </div>
+        <div id="cyclesSummary" class="cycles-summary"></div>
+        <div id="cyclesTableWrap"></div>
+      </section>
+
+      <section class="card">
+        <div class="card-header">
+          <span class="card-title">Raw IMU Viewer</span>
+        </div>
+        <div class="controls">
+          <div class="control-group">
+            <span class="control-label">ข้อมูล</span>
+            <div class="segmented" id="frameToggle">
+              <button type="button" class="active" data-frame="canonical">Canonical</button>
+              <button type="button" data-frame="sensor">Sensor frame</button>
+            </div>
+          </div>
+          <div class="control-group">
+            <span class="control-label">เซ็นเซอร์</span>
+            <div class="segmented" id="sensorToggle">
+              <button type="button" class="active" data-sensor="all">ทั้งหมด</button>
+              <button type="button" data-sensor="LEFT_SHANK">Left shank</button>
+              <button type="button" data-sensor="RIGHT_SHANK">Right shank</button>
+            </div>
+          </div>
+          <div class="control-group">
+            <span class="control-label">แกน</span>
+            <div class="segmented" id="axisToggle">
+              <button type="button" class="active" data-axis="accel">Accel</button>
+              <button type="button" data-axis="gyro">Gyro</button>
+              <button type="button" data-axis="both">ทั้งคู่</button>
+            </div>
+          </div>
+          <div class="control-group control-group--wide">
+            <span class="control-label">ซูมเวลา</span>
+            <input type="range" id="timeSlider" min="0" max="100" value="0" step="0.1" />
+            <div class="slider-labels">
+              <span id="sliderStart">0 s</span>
+              <span id="sliderEnd">—</span>
+            </div>
+          </div>
+        </div>
+
+        <div class="chart-toolbar" style="margin-top:16px;">
+          <span id="chartTitle">Accelerometer</span>
+          <div class="chart-actions">
+            <button type="button" id="resetZoom">รีเซ็ตซูม</button>
+            <button type="button" id="fitWindow">ดู 30 วินาทีล่าสุด</button>
+          </div>
+        </div>
+        <div id="chart" class="chart"></div>
+        <p class="chart-hint">เวลาอ้างอิงแยกต่อเซ็นเซอร์ (L/R ซ้อนทับกันได้) · เลื่อนล้อเมาส์เพื่อซูม · ลากเพื่อเลื่อน</p>
+      </section>
+
+      <section class="card">
+        <div class="card-header">
+          <span class="card-title">ตัวอย่างข้อมูลดิบ (100 แถวแรกในช่วงที่เลือก)</span>
+        </div>
+        <div class="table-wrap">
+          <table id="sampleTable" class="data-table">
+            <thead>
+              <tr>
+                <th>t (s)</th><th>seq</th><th>sensor</th><th>side</th>
+                <th>ax</th><th>ay</th><th>az</th><th>gx</th><th>gy</th><th>gz</th>
+              </tr>
+            </thead>
+            <tbody></tbody>
+          </table>
+        </div>
+      </section>
+
+      <section class="card">
+        <div class="card-header"><span class="card-title">Note (จาก header ของไฟล์)</span></div>
+        <p class="note-text" id="noteText"></p>
+      </section>
+    </div>
+  </main>
+
+  <script type="module" src="app.js"></script>
+</body>
+</html>
