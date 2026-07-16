@@ -109,4 +109,64 @@ test('end-to-end: parse CSV จริง -> resolve role จากชื่อ -
   // --- session summary สมเหตุสมผล ---
   assert.ok(Math.abs(result.session.averageWalkingSpeedMps - FIXTURE.WALK_SPEED_MPS) < 0.1,
     `averageWalkingSpeedMps=${result.session.averageWalkingSpeedMps} ควรใกล้ ${FIXTURE.WALK_SPEED_MPS.toFixed(2)}`);
+
+  assert.equal(result.meta.unitScale, 1);
+  assert.ok(Array.isArray(result.meta.warnings));
+});
+
+test('🟡 units: ไฟล์ mm ถูก auto-scale เป็นเมตร', () => {
+  const { csv } = buildSyntheticCsv();
+  // คูณพิกัดทั้งหมด ×1000 เพื่อจำลอง Motive export เป็น mm
+  const mmCsv = csv.split('\n').map((line) => {
+    if (!line.startsWith('frame,')) return line;
+    const parts = line.split(',');
+    let p = 4; // after frame,idx,time,rbCount
+    const rbCount = Number(parts[3]);
+    p = 4 + rbCount * 11;
+    const markerCount = Number(parts[p]);
+    p += 1;
+    for (let m = 0; m < markerCount; m += 1) {
+      parts[p] = String(Number(parts[p]) * 1000); // x
+      parts[p + 1] = String(Number(parts[p + 1]) * 1000); // y
+      parts[p + 2] = String(Number(parts[p + 2]) * 1000); // z
+      p += 5;
+    }
+    return parts.join(',');
+  }).join('\n');
+
+  const parsed = parseOptiTrackCsv(mmCsv);
+  const { resolved, ok } = resolveMarkerRoles(listMarkers(parsed));
+  assert.equal(ok, true);
+  const result = computeGaitFromMocap(parsed, resolved);
+  assert.equal(result.meta.unitScale, 0.001);
+  assert.ok(result.meta.warnings.some((w) => /mm/i.test(w)));
+  assert.ok(Math.abs(result.perSide.L.summary.meanStrideLengthM - FIXTURE.STRIDE_LENGTH_M) < 0.15,
+    `หลัง scale stride ควรใกล้เมตรจริง ได้ ${result.perSide.L.summary.meanStrideLengthM}`);
+});
+
+test('🟡 units: autoScaleMillimetres:false ต้อง throw ชัดเจน', () => {
+  const { csv } = buildSyntheticCsv();
+  const mmCsv = csv.split('\n').map((line) => {
+    if (!line.startsWith('frame,')) return line;
+    const parts = line.split(',');
+    let p = 4;
+    const rbCount = Number(parts[3]);
+    p = 4 + rbCount * 11;
+    const markerCount = Number(parts[p]);
+    p += 1;
+    for (let m = 0; m < markerCount; m += 1) {
+      parts[p] = String(Number(parts[p]) * 1000);
+      parts[p + 1] = String(Number(parts[p + 1]) * 1000);
+      parts[p + 2] = String(Number(parts[p + 2]) * 1000);
+      p += 5;
+    }
+    return parts.join(',');
+  }).join('\n');
+
+  const parsed = parseOptiTrackCsv(mmCsv);
+  const { resolved } = resolveMarkerRoles(listMarkers(parsed));
+  assert.throws(
+    () => computeGaitFromMocap(parsed, resolved, { autoScaleMillimetres: false }),
+    /mm/,
+  );
 });

@@ -2,40 +2,124 @@
 // Ankle/Lateral Malleolus x2)
 //
 // Event detection (Heel Strike / Toe Off) ใช้ "foot velocity algorithm" — มองพฤติกรรม
-// การเคลื่อนที่ของข้อเท้าโดยตรง (นิ่ง = แตะพื้น, ขยับ = แกว่ง) ไม่ได้ใช้ GaitEventDetector
-// ของ IMU pipeline อีกต่อไป: การใช้ detector ตัวเดียวกันสำหรับทั้งสองแหล่งข้อมูลมีจุดบอดร่วม
-// (shared blind spot) — ถ้า algorithm มี bias เป็นระบบ bias นั้นจะปรากฏเหมือนกันทั้งสองฝั่ง
-// แล้วหักล้างกันหายไปตอนเทียบผล ทำให้ดูเหมือน "ตรงกัน" ทั้งที่ทั้งคู่ผิดไปทางเดียวกัน วิธีนี้
-// (velocityEventDetector.js) จึงเป็น ground truth ที่อิสระจากอัลกอริทึมฝั่ง IMU จริง ๆ
-// (ดู mocap-analysis/velocityEventDetector.js สำหรับรายละเอียด + อ้างอิงวรรณกรรม)
+// การเคลื่อนที่ของข้อเท้าโดยตรง ไม่ได้ใช้ GaitEventDetector ของ IMU pipeline
+// (หลีกเลี่ยง shared blind spot)
 //
-// ⚠️ ข้อจำกัดที่ตั้งใจไว้ตรง ๆ (ยังไม่มีข้อมูลจริงมาตรวจสอบ):
-//   - threshold ของ velocityEventDetector เป็นค่าเริ่มต้นที่ตรวจสอบแล้วว่าเสถียรกับ
-//     synthetic ground truth (คลาดเคลื่อน stance duration < 1.5% ในช่วง 0.02-0.3 m/s)
-//     แต่ยังไม่เคยเห็นข้อมูลจริงซึ่งมี marker noise/jitter มากกว่าข้อมูลสังเคราะห์ไร้ noise
-//   - ไม่มี marker ปลายเท้า/heel ในชุดนี้ (ASIS+Knee+Ankle เท่านั้น) จึงใช้ "ข้อเท้า" เป็นจุด
-//     สังเกตการแตะพื้นแทนส้นเท้า/ปลายเท้าโดยตรง — สมเหตุสมผลเพราะข้อเท้า/malleolus แทบไม่ขยับ
-//     แนวราบตอน stance เหมือนกัน (foot flat, ankle joint เป็นจุดหมุน) แต่ TO ที่ได้อาจหมายถึง
-//     "เท้าเริ่มขยับ" กว้าง ๆ ไม่ใช่ "ปลายเท้าพ้นพื้น" เป๊ะเหมือนมี toe marker จริง
-//   - "clearance" คือระยะยกของ "ข้อเท้า" ไม่ใช่ปลายเท้า — ใกล้เคียงตำแหน่งที่ IMU ติดจริง
-//     บนหน้าแข้งส่วนล่างพอสมควร แต่ไม่ใช่ค่าเดียวกันเป๊ะกับ clearance ที่ระบบ IMU รายงาน
-//     (นั่นวัดจาก double integration ของ accel บนหน้าแข้ง คนละตำแหน่ง/คนละวิธี)
-//   - สมมติว่าเดินเป็นเส้นตรง (ไม่มีเลี้ยว) ตอนหาแกนทิศทางเดินจาก ASIS midpoint
+// Pipeline ความเร็ว: Butterworth low-pass zero-lag (default 6 Hz) บนตำแหน่ง → แล้วค่อย
+// central-difference — จำเป็นเพราะ differentiate ขยาย marker noise ด้วย ~1/(2·dt)
 //
-// shankAngleDeg/angularVelocityDps ยังคำนวณไว้ (peakShankAngleDeg ในผลลัพธ์ + เผื่อใช้ทำ
-// direct signal-correlation เทียบกับมุมจาก IMU+Kalman โดยตรงในอนาคต — เป็นการ validate ที่
-// อิสระกว่าเดิมอีกแบบ เพราะไม่ต้องพึ่ง event detector เลยด้วยซ้ำ) แต่ไม่ได้ใช้หา HS/TO แล้ว
+// ⚠️ ข้อจำกัดที่ยังมี:
+//   - ไม่มี marker ปลายเท้า/heel → ใช้ข้อเท้าแทน (TO = "เท้าเริ่มขยับ" ไม่ใช่ toe-off เป๊ะ)
+//   - clearance = ระยะยกข้อเท้า ไม่ใช่ปลายเท้า / จุดติด IMU
+//   - สมมติเดินเป็นเส้นตรงตอนหา forward axis จาก ASIS midpoint
 
 import { rad2deg } from '../src/gait/signalUtils.js';
 import { extractMarkerSeries, interpolateGaps } from './parseOptiTrack.js';
-import { computeForwardPosition, computeVelocity, detectStanceIntervals, buildCyclesFromStanceIntervals } from './velocityEventDetector.js';
+import {
+  computeForwardPosition,
+  computeFilteredVelocity,
+  detectStanceIntervals,
+  buildCyclesFromStanceIntervals,
+} from './velocityEventDetector.js';
 
 function dot2(ax, az, bx, bz) {
   return ax * bx + az * bz;
 }
 
+function meanFinite(values) {
+  const finite = values.filter(Number.isFinite);
+  if (!finite.length) return null;
+  return finite.reduce((a, b) => a + b, 0) / finite.length;
+}
+
+function rangeFinite(values) {
+  const finite = values.filter(Number.isFinite);
+  if (!finite.length) return null;
+  return Math.max(...finite) - Math.min(...finite);
+}
+
+/**
+ * ตรวจว่าพิกัดน่าจะเป็นเมตรหรือมิลลิเมตร + แกน Y เป็นแนวดิ่งตาม OptiTrack default หรือไม่
+ * ถ้าเป็น mm จะ rescale series ทั้งชุดด้วย 0.001
+ */
+export function assertAndNormalizeCaptureUnits(seriesByRole, options = {}) {
+  const warnings = [];
+  const asisL = seriesByRole.L_ASIS;
+  const asisR = seriesByRole.R_ASIS;
+  if (!asisL || !asisR) {
+    throw new Error('ต้องมี L_ASIS และ R_ASIS สำหรับตรวจหน่วย/แกน');
+  }
+
+  const midX = asisL.x.map((v, i) => (v === null || asisR.x[i] === null ? null : (v + asisR.x[i]) / 2));
+  const midY = asisL.y.map((v, i) => (v === null || asisR.y[i] === null ? null : (v + asisR.y[i]) / 2));
+  const midZ = asisL.z.map((v, i) => (v === null || asisR.z[i] === null ? null : (v + asisR.z[i]) / 2));
+
+  const meanY = meanFinite(midY);
+  const rangeX = rangeFinite(midX);
+  const rangeY = rangeFinite(midY);
+  const rangeZ = rangeFinite(midZ);
+
+  // หน่วย: ความสูง ASIS ผู้ใหญ่ ~0.8–1.2 m — ถ้า meanY อยู่ใน 100–3000 น่าจะเป็น mm
+  let unitScale = 1;
+  if (Number.isFinite(meanY) && meanY >= 100 && meanY <= 3000) {
+    if (options.autoScaleMillimetres === false) {
+      throw new Error(
+        `ASIS mean Y ≈ ${meanY.toFixed(1)} — น่าจะเป็นหน่วย mm (Motive export เป็น mm ได้) `
+        + 'แต่ pipeline คาดหวังเมตร (threshold 0.15 m/s จะพังเงียบ ๆ ถ้าไม่แปลง). '
+        + 'ส่ง autoScaleMillimetres:true หรือ export เป็นเมตร',
+      );
+    }
+    unitScale = 0.001;
+    warnings.push(
+      `ตรวจพบหน่วยน่าจะเป็น mm (ASIS mean Y≈${meanY.toFixed(0)}) — แปลงเป็นเมตรอัตโนมัติ (×0.001)`,
+    );
+  } else if (Number.isFinite(meanY) && (meanY < 0.3 || meanY > 2.5) && meanY < 100) {
+    warnings.push(
+      `ASIS mean Y=${meanY.toFixed(3)} อยู่นอกช่วงความสูงเชิงกรานปกติ (~0.8–1.2m) — ตรวจหน่วย/marker map`,
+    );
+  }
+
+  // แกนแนวดิ่ง: แกนที่ ASIS midpoint มี range เล็กสุดควรเป็นแนวดิ่ง (เดินตรง)
+  // OptiTrack default = Y-up
+  if (Number.isFinite(rangeX) && Number.isFinite(rangeY) && Number.isFinite(rangeZ)) {
+    const ranges = [
+      { axis: 'X', range: rangeX },
+      { axis: 'Y', range: rangeY },
+      { axis: 'Z', range: rangeZ },
+    ].sort((a, b) => a.range - b.range);
+    const smallest = ranges[0].axis;
+    if (smallest !== 'Y') {
+      const msg = `แกนที่ ASIS เคลื่อนน้อยสุดคือ ${smallest} (range X/Y/Z=`
+        + `${rangeX.toFixed(3)}/${rangeY.toFixed(3)}/${rangeZ.toFixed(3)}) `
+        + '— คาดหวัง Y เป็นแนวดิ่ง (OptiTrack default). ถ้า capture เป็น Z-up '
+        + 'ankleClearance/มุมหน้าแข้งจะผิดหมด';
+      if (options.strictVerticalAxis) {
+        throw new Error(msg);
+      }
+      warnings.push(msg);
+    }
+  }
+
+  const scaleSeries = (series) => {
+    if (unitScale === 1) return series;
+    return {
+      t: series.t,
+      x: series.x.map((v) => (v === null ? null : v * unitScale)),
+      y: series.y.map((v) => (v === null ? null : v * unitScale)),
+      z: series.z.map((v) => (v === null ? null : v * unitScale)),
+    };
+  };
+
+  const normalized = {};
+  for (const [role, series] of Object.entries(seriesByRole)) {
+    normalized[role] = scaleSeries(series);
+  }
+
+  return { seriesByRole: normalized, unitScale, warnings, meanAsisY: meanY, ranges: { rangeX, rangeY, rangeZ } };
+}
+
 // แกนเดินหลัก (forward) จาก midpoint ของ ASIS สองข้าง — สมมติเดินเส้นตรง (ไม่เลี้ยว)
-// ใช้ระยะจากจุดแรกไปจุดสุดท้ายที่มีข้อมูลจริงในแนวราบ (X,Z; Y เป็นแนวดิ่งตาม OptiTrack default)
+// ใช้ระยะจากจุดแรกไปจุดสุดท้ายในแนวราบ (X,Z; Y เป็นแนวดิ่งตาม OptiTrack default)
 export function computeForwardAxis(pelvisX, pelvisZ) {
   let firstIdx = -1;
   let lastIdx = -1;
@@ -61,9 +145,6 @@ export function computeForwardAxis(pelvisX, pelvisZ) {
   return { fx: dx / mag, fz: dz / mag, netDisplacementM: mag };
 }
 
-// มุมหน้าแข้งเทียบแนวดิ่งในระนาบ sagittal (ระนาบที่มีแกนเดิน+แนวดิ่ง) — เทียบเคียงกับ
-// accelToAngle ที่ pipeline IMU ใช้ (atan2 ของ component แนวเดิน กับ แนวดิ่ง)
-// เวกเตอร์ที่ใช้: ankle -> knee (ชี้ "ขึ้น" ไปตามหน้าแข้ง)
 export function computeShankAngleDeg(kneeSeries, ankleSeries, forwardAxis) {
   const n = kneeSeries.x.length;
   const angleDeg = new Array(n).fill(null);
@@ -80,8 +161,6 @@ export function computeShankAngleDeg(kneeSeries, ankleSeries, forwardAxis) {
   return angleDeg;
 }
 
-// อนุพันธ์เชิงตัวเลข (central difference) เป็น deg/s จาก dt จริงต่อคู่เฟรม (ทนต่อ dt ไม่คงที่)
-// เก็บไว้สำหรับ direct signal-correlation เทียบกับ IMU ในอนาคต (ไม่ได้ใช้หา HS/TO แล้ว)
 export function computeAngularVelocityDps(t, angleDeg) {
   const n = angleDeg.length;
   const w = new Array(n).fill(null);
@@ -112,25 +191,17 @@ function assertNoGaps(remainingGaps, label) {
   }
 }
 
-function computeSideGait(parsed, kneeId, ankleId, forwardAxis, detectorOptions) {
-  const kneeRaw = extractMarkerSeries(parsed, kneeId);
-  const ankleRaw = extractMarkerSeries(parsed, ankleId);
-  const { series: knee, remainingGaps: kneeGaps } = interpolateGaps(kneeRaw);
-  const { series: ankle, remainingGaps: ankleGaps } = interpolateGaps(ankleRaw);
-  assertNoGaps(kneeGaps, `knee marker #${kneeId}`);
-  assertNoGaps(ankleGaps, `ankle marker #${ankleId}`);
-
+function computeSideGait(parsed, kneeSeries, ankleSeries, forwardAxis, detectorOptions) {
   const t0 = parsed.frames[0].time;
   const t = parsed.frames.map((f) => f.time - t0);
 
-  // มุมหน้าแข้ง — ใช้แค่รายงาน peakShankAngleDeg ไม่ได้ใช้หา event อีกต่อไป
-  const angleDeg = computeShankAngleDeg(knee, ankle, forwardAxis);
+  const angleDeg = computeShankAngleDeg(kneeSeries, ankleSeries, forwardAxis);
 
-  // Heel-Strike/Toe-Off จากความเร็วแนวเดินของข้อเท้าโดยตรง — อิสระจาก IMU detector 100%
-  const forwardPosition = computeForwardPosition(ankle, forwardAxis);
-  const forwardVelocity = computeVelocity(t, forwardPosition);
-  const stanceIntervals = detectStanceIntervals(t, forwardVelocity, detectorOptions);
-  const rawCycles = buildCyclesFromStanceIntervals(t, forwardPosition, stanceIntervals, detectorOptions);
+  const forwardPosition = computeForwardPosition(ankleSeries, forwardAxis);
+  const { smoothedPosition, velocity } = computeFilteredVelocity(t, forwardPosition, detectorOptions);
+  const stanceIntervals = detectStanceIntervals(t, velocity, detectorOptions);
+  // ใช้ smoothed position วัด stride — สอดคล้องกับสัญญาณที่ใช้ detect event
+  const rawCycles = buildCyclesFromStanceIntervals(t, smoothedPosition, stanceIntervals, detectorOptions);
 
   const cycles = rawCycles.map((cycle) => {
     let peakAngleDeg = -Infinity;
@@ -138,12 +209,17 @@ function computeSideGait(parsed, kneeId, ankleId, forwardAxis, detectorOptions) 
     let maxY = -Infinity;
     for (let i = cycle.hsStartIdx; i <= cycle.hsEndIdx; i += 1) {
       if (Number.isFinite(angleDeg[i])) peakAngleDeg = Math.max(peakAngleDeg, angleDeg[i]);
-      minY = Math.min(minY, ankle.y[i]);
-      maxY = Math.max(maxY, ankle.y[i]);
+      if (Number.isFinite(ankleSeries.y[i])) {
+        minY = Math.min(minY, ankleSeries.y[i]);
+        maxY = Math.max(maxY, ankleSeries.y[i]);
+      }
     }
 
     const walkingSpeedMps = cycle.strideTimeS > 0 ? cycle.strideLengthM / cycle.strideTimeS : null;
     const cadenceSpm = cycle.strideTimeS > 0 ? (2 / cycle.strideTimeS) * 60 : null;
+    const ankleClearanceM = Number.isFinite(maxY) && Number.isFinite(minY)
+      ? Math.max(0, maxY - minY)
+      : null;
 
     return {
       hsStartTimeS: cycle.hsStartTimeS,
@@ -158,8 +234,7 @@ function computeSideGait(parsed, kneeId, ankleId, forwardAxis, detectorOptions) 
       cadenceSpm,
       walkingSpeedMps,
       peakShankAngleDeg: Number.isFinite(peakAngleDeg) ? peakAngleDeg : null,
-      // proxy: ระยะยกข้อเท้า ไม่ใช่ปลายเท้า/จุดติด IMU เป๊ะ ๆ — ดู caveat หัวไฟล์
-      ankleClearanceM: Math.max(0, maxY - minY),
+      ankleClearanceM,
     };
   });
 
@@ -177,20 +252,58 @@ function computeSideGait(parsed, kneeId, ankleId, forwardAxis, detectorOptions) 
   };
 }
 
+function assertClearancePlausible(side, cycles, warnings) {
+  const clearances = cycles.map((c) => c.ankleClearanceM).filter(Number.isFinite);
+  if (!clearances.length) return;
+  const meanClearance = clearances.reduce((a, b) => a + b, 0) / clearances.length;
+  // ช่วงกว้างเผื่อ noise — ถ้านอก 0.02–0.40m มักเป็นแกนผิดหรือหน่วยผิด
+  if (meanClearance < 0.02 || meanClearance > 0.40) {
+    warnings.push(
+      `ขา ${side}: mean ankleClearance=${meanClearance.toFixed(3)}m อยู่นอกช่วงที่คาด (0.02–0.40m) `
+      + '— อาจแกนแนวดิ่งผิดหรือหน่วยผิด',
+    );
+  }
+}
+
 export function computeGaitFromMocap(parsed, markerRoles, options = {}) {
   const { L_ASIS, R_ASIS, L_Knee, R_Knee, L_Ankle, R_Ankle } = markerRoles;
-  const asisL = extractMarkerSeries(parsed, L_ASIS);
-  const asisR = extractMarkerSeries(parsed, R_ASIS);
 
+  const rawByRole = {
+    L_ASIS: extractMarkerSeries(parsed, L_ASIS),
+    R_ASIS: extractMarkerSeries(parsed, R_ASIS),
+    L_Knee: extractMarkerSeries(parsed, L_Knee),
+    R_Knee: extractMarkerSeries(parsed, R_Knee),
+    L_Ankle: extractMarkerSeries(parsed, L_Ankle),
+    R_Ankle: extractMarkerSeries(parsed, R_Ankle),
+  };
+
+  // interpolate gaps ต่อ series ก่อน normalize หน่วย
+  const filledByRole = {};
+  for (const [role, raw] of Object.entries(rawByRole)) {
+    const { series, remainingGaps } = interpolateGaps(raw);
+    assertNoGaps(remainingGaps, `${role} marker`);
+    filledByRole[role] = series;
+  }
+
+  const {
+    seriesByRole,
+    unitScale,
+    warnings,
+  } = assertAndNormalizeCaptureUnits(filledByRole, options);
+
+  const asisL = seriesByRole.L_ASIS;
+  const asisR = seriesByRole.R_ASIS;
   const pelvisX = asisL.x.map((v, i) => (v === null || asisR.x[i] === null ? null : (v + asisR.x[i]) / 2));
   const pelvisZ = asisL.z.map((v, i) => (v === null || asisR.z[i] === null ? null : (v + asisR.z[i]) / 2));
   const forwardAxis = computeForwardAxis(pelvisX, pelvisZ);
 
-  const left = computeSideGait(parsed, L_Knee, L_Ankle, forwardAxis, options.detector);
-  const right = computeSideGait(parsed, R_Knee, R_Ankle, forwardAxis, options.detector);
+  const detectorOptions = options.detector || {};
+  const left = computeSideGait(parsed, seriesByRole.L_Knee, seriesByRole.L_Ankle, forwardAxis, detectorOptions);
+  const right = computeSideGait(parsed, seriesByRole.R_Knee, seriesByRole.R_Ankle, forwardAxis, detectorOptions);
 
-  // bilateral: รวม HS ทั้งสองข้างตามเวลาจริง เพื่อวัด step time/cadence ที่ไม่ต้องสมมติสมมาตร
-  // (ต่างจาก IMU ข้างเดียวที่ stepTime = strideTime/2 เสมอ — ใช้ตรงนี้ตรวจสมมติฐานนั้นได้)
+  assertClearancePlausible('L', left.cycles, warnings);
+  assertClearancePlausible('R', right.cycles, warnings);
+
   const hsEvents = [
     ...left.cycles.map((c) => ({ side: 'L', timeS: c.hsStartTimeS })),
     ...right.cycles.map((c) => ({ side: 'R', timeS: c.hsStartTimeS })),
@@ -224,6 +337,10 @@ export function computeGaitFromMocap(parsed, markerRoles, options = {}) {
       durationS,
       pelvisNetForwardDisplacementM: forwardAxis.netDisplacementM,
       averageWalkingSpeedMps: durationS > 0 ? forwardAxis.netDisplacementM / durationS : null,
+    },
+    meta: {
+      unitScale,
+      warnings,
     },
   };
 }

@@ -86,6 +86,14 @@ function main() {
   console.log(`\nแกนทิศทางเดิน: fx=${result.forwardAxis.fx.toFixed(3)} fz=${result.forwardAxis.fz.toFixed(3)} `
     + `(ระยะสุทธิ ${result.forwardAxis.netDisplacementM.toFixed(2)}m)`);
 
+  if (result.meta?.warnings?.length) {
+    console.log('\nคำเตือน:');
+    for (const w of result.meta.warnings) console.log(`  ⚠️ ${w}`);
+  }
+  if (result.meta?.unitScale && result.meta.unitScale !== 1) {
+    console.log(`  (unitScale ที่ใช้: ${result.meta.unitScale})`);
+  }
+
   printSideReport('L', result.perSide.L);
   printSideReport('R', result.perSide.R);
 
