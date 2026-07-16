@@ -196,6 +196,7 @@ function computeSideGait(parsed, kneeSeries, ankleSeries, forwardAxis, detectorO
   const t = parsed.frames.map((f) => f.time - t0);
 
   const angleDeg = computeShankAngleDeg(kneeSeries, ankleSeries, forwardAxis);
+  const shankAngularVelocityDps = computeAngularVelocityDps(t, angleDeg);
 
   const forwardPosition = computeForwardPosition(ankleSeries, forwardAxis);
   const { smoothedPosition, velocity } = computeFilteredVelocity(t, forwardPosition, detectorOptions);
@@ -248,6 +249,11 @@ function computeSideGait(parsed, kneeSeries, ankleSeries, forwardAxis, detectorO
       cycleCount: cycles.length,
       meanStrideLengthM: mean(strideLengths),
       meanCadenceSpm: mean(cadences),
+    },
+    // สำหรับ align ระดับสัญญาณ (xcorr) กับ IMU gyro — อิสระจาก event detector
+    signals: {
+      tS: t,
+      shankAngularVelocityDps,
     },
   };
 }

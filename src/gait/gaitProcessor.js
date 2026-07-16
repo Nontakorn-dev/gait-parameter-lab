@@ -395,6 +395,9 @@ export class GaitProcessor {
     this.sessionStartTime = null;
     this.latestSampleTimestampMs = null;
     this.relativeTimestampOriginMs = null;
+    // สะสม ms ข้าม micros()/uint32 wrap — ห้าม reset เป็น 0 กลาง session
+    this.accumulatedRelativeMs = 0;
+    this.lastRelativeDeltaMs = 1000 / SAMPLE_RATE;
     // ไม่ใช้เป็นฐานเวลาอีกแล้ว — เดิมผูก Date.now() ทำให้ cycleStartTimestampMs
     // ไม่ reproducible ตอน reprocess relative timestamps จาก firmware
     this.absoluteTimestampOriginMs = null;
@@ -786,6 +789,8 @@ export class GaitProcessor {
     this.sessionStartTime = null;
     this.latestSampleTimestampMs = null;
     this.relativeTimestampOriginMs = null;
+    this.accumulatedRelativeMs = 0;
+    this.lastRelativeDeltaMs = 1000 / SAMPLE_RATE;
     this.absoluteTimestampOriginMs = null;
     this.lastSourceTimestampMs = null;
     const preservedCalibration = this.calibration;
@@ -809,18 +814,38 @@ export class GaitProcessor {
       return valueMs;
     }
 
-    // Relative timestamp (เช่น ESP32 micros()/1000 นับจากบูต): เก็บเป็น ms นับจาก
-    // จุดเริ่ม session นี้ — ไม่ผูก Date.now() เพื่อให้ reprocess ไฟล์เดิมได้ค่าเดิม
-    // และ align กับ mocap ที่ใช้ (t - t0) ได้
-    if (
-      this.relativeTimestampOriginMs === null
-      || (this.lastSourceTimestampMs !== null && valueMs < this.lastSourceTimestampMs - 1000)
+    // Relative timestamp (เช่น ESP32 micros()/1000 นับจากบูต): session-relative ms
+    // ที่ reproducible — ไม่ผูก Date.now()
+    //
+    // สำคัญ: micros() เป็น uint32 ห่อกลับ ~ทุก 71.6 นาที (t_ms ≈ 4.29e6 → 0)
+    // ถ้าแค่ reset origin เวลา session จะถอยเป็น 0 กลาง trace → sort/align พัง
+    // แก้โดยสะสม offset ข้าม wrap แล้วต่อช่วงเวลาให้เดินหน้าต่อเนื่อง
+    if (this.relativeTimestampOriginMs === null) {
+      this.relativeTimestampOriginMs = valueMs;
+      this.accumulatedRelativeMs = 0;
+    } else if (
+      this.lastSourceTimestampMs !== null
+      && valueMs < this.lastSourceTimestampMs - 1000
     ) {
+      const typicalDeltaMs = Number.isFinite(this.lastRelativeDeltaMs)
+        ? this.lastRelativeDeltaMs
+        : (1000 / SAMPLE_RATE);
+      this.accumulatedRelativeMs += (
+        this.lastSourceTimestampMs - this.relativeTimestampOriginMs
+      ) + typicalDeltaMs;
       this.relativeTimestampOriginMs = valueMs;
     }
 
+    const resolved = this.accumulatedRelativeMs + (valueMs - this.relativeTimestampOriginMs);
+    if (this.lastSourceTimestampMs !== null) {
+      const sourceDelta = valueMs - this.lastSourceTimestampMs;
+      // เก็บ Δt ปกติไว้ใช้ตอน wrap (ข้ามค่าติดลบจาก wrap เอง)
+      if (sourceDelta > 0 && sourceDelta < 500) {
+        this.lastRelativeDeltaMs = sourceDelta;
+      }
+    }
     this.lastSourceTimestampMs = valueMs;
-    return valueMs - this.relativeTimestampOriginMs;
+    return resolved;
   }
 
   getSampleIntervalSeconds(timestampMs) {

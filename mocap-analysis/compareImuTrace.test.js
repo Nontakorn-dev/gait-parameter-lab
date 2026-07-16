@@ -10,6 +10,8 @@ import {
   summarizeMocapSide,
   summarizeImuSide,
   pairCyclesByTime,
+  estimateHsTimeLagS,
+  estimateSignalLagS,
 } from './compareImuTrace.js';
 
 function buildDemoTrace({ numStrides = 8, side = 'R', boardEpochMs = 5000 } = {}) {
@@ -239,4 +241,45 @@ test('🔴 pairCyclesByTime: จับคู่หลังมี lag คงท�
   assert.ok(Math.abs(aligned.lagS - 1.5) < 0.3, `lag ควรใกล้ 1.5s ได้ ${aligned.lagS}`);
   // คู่ที่จับได้ไม่ควรรวม idle stride 0.3m ที่ต้น
   assert.ok(aligned.pairs.every((p) => p.imu.strideLengthM > 0.8));
+  // HS-event lag → timing metric ใช้ไม่ได้ (shared blind spot)
+  assert.equal(aligned.timingMetricValid, false);
+  assert.equal(aligned.meanTimeErrorS, null);
+});
+
+test('🔴 estimateHsTimeLagS: ไม่ให้ 0 ชนะ tie เมื่อ residual แย่กว่า (lag จริง 0.35s)', () => {
+  const mocap = [0, 1, 2, 3].map((t) => ({ hsStartTimeS: t }));
+  const imu = [0.35, 1.35, 2.35, 3.35].map((t) => ({ cycleStartTimeS: t }));
+  const { lagS, matchCount } = estimateHsTimeLagS(mocap, imu, { matchToleranceS: 0.40 });
+  assert.equal(matchCount, 4);
+  assert.ok(Math.abs(lagS - 0.35) < 0.05, `ควรได้ ~0.35 ไม่ใช่ 0 ได้ ${lagS}`);
+});
+
+test('🔴 estimateSignalLagS: หา lag จากสัญญาณ + residual HS สะท้อน detector bias', () => {
+  const dt = 0.02;
+  const n = 500;
+  const mocapT = Array.from({ length: n }, (_, i) => i * dt);
+  const mocapY = mocapT.map((t) => Math.sin(2 * Math.PI * 1.1 * t));
+  const trueLagS = 0.36;
+  const imuT = mocapT.map((t) => t);
+  // IMU = mocap เลื่อนไปทางขวา (ช้ากว่า) trueLagS
+  const imuY = imuT.map((t) => Math.sin(2 * Math.PI * 1.1 * (t - trueLagS)));
+
+  const signal = estimateSignalLagS(mocapT, mocapY, imuT, imuY, { maxLagS: 2, dtS: dt });
+  assert.equal(signal.ok, true);
+  assert.ok(Math.abs(signal.lagS - trueLagS) <= dt + 1e-9, `xcorr lag=${signal.lagS}`);
+
+  // HS events: mocap ตรงกับสัญญาณ, IMU detector มี bias +0.10s เพิ่มจาก sync
+  const detectorBiasS = 0.10;
+  const mocapCycles = [1, 2, 3, 4].map((k) => ({ hsStartTimeS: k }));
+  const imuCycles = [1, 2, 3, 4].map((k) => ({
+    cycleStartTimeS: k + trueLagS + detectorBiasS,
+  }));
+  const paired = pairCyclesByTime(mocapCycles, imuCycles, {
+    lagS: signal.lagS,
+    lagSource: 'signal-xcorr',
+    matchToleranceS: 0.40,
+  });
+  assert.equal(paired.timingMetricValid, true);
+  assert.ok(Math.abs(paired.meanTimeErrorS - detectorBiasS) < 0.05,
+    `หลัง signal-align residual ควร ≈ detector bias ได้ ${paired.meanTimeErrorS}`);
 });

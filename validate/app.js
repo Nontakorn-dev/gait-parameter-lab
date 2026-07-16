@@ -638,9 +638,13 @@ function sideCompareHtml(side, block) {
     const alignNote = align
       ? `<p class="chart-hint" style="margin:0 0 8px;">
           align: <b>${align.mode}</b>
+          · source ${align.lagSource || "—"}
           · paired ${align.pairedCount}
           · lag ${formatNum(align.lagS, 2)} s
           · unpaired MoCap/IMU ${align.unpairedMocap}/${align.unpairedImu}
+          ${align.timingMetricValid
+            ? `· HS timing ${formatSigned(align.meanTimeErrorS * 1000, 0)} ms`
+            : "· HS timing n/a (ไม่ใช่เมตริกเมื่อ sync จาก events)"}
         </p>`
       : "";
     return `<div class="compare-side">

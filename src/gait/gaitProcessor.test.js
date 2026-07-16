@@ -219,3 +219,26 @@ test('🔴 resolveTimestampMs: relative board clock → session-relative ที�
   assert.deepEqual(a, b);
   assert.ok(a.every((t) => t < 1e11), `ต้องไม่เป็น wall-clock epoch ได้ ${a[0]}`);
 });
+
+test('🔴 resolveTimestampMs: micros wrap ต้องเดินหน้าต่อ ไม่รีเซ็ตเป็น 0', () => {
+  const proc = new GaitProcessor();
+  // จำลอง ESP32 micros()/1000 ใกล้ overflow แล้วห่อกลับ
+  const nearWrap = 4_294_960;
+  const times = [];
+  for (let i = 0; i < 5; i += 1) {
+    times.push(proc.resolveTimestampMs({ timestampMs: nearWrap + i * 10 }));
+  }
+  // wrap: 20, 30, 40...
+  for (let i = 0; i < 5; i += 1) {
+    times.push(proc.resolveTimestampMs({ timestampMs: 20 + i * 10 }));
+  }
+
+  for (let i = 1; i < times.length; i += 1) {
+    assert.ok(
+      times[i] > times[i - 1],
+      `เวลาต้องเดินหน้า: t[${i - 1}]=${times[i - 1]} → t[${i}]=${times[i]}`,
+    );
+  }
+  // ค่าหลัง wrap ต้องต่อเนื่องจากก่อน wrap (~ nearWrap-origin + deltas) ไม่ใช่ ~0
+  assert.ok(times[5] > 40, `หลัง wrap ต้องไม่รีสตาร์ทใกล้ 0 ได้ ${times[5]}`);
+});
