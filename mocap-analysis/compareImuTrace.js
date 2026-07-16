@@ -27,6 +27,12 @@ const DEFAULT_MAX_LAG_S = 0.4;
 const DEFAULT_XCORR_DT_S = 0.005;
 const DEFAULT_MIN_PEAK_CORR = 0.5;
 const AMBIGUOUS_PEAK_RATIO = 0.95;
+// เช็ค polarity ที่ lag≈0 ก่อนเชื่อ peak ที่อื่น — สัญญาณกลับขั้วมักมี sidelobe บวก (~0.6)
+// ที่ lag อื่น ซึ่งผ่าน minPeakCorr ได้ถ้าไม่ดูที่ 0 ก่อน
+const POLARITY_ZERO_CORR_MAX = -0.15;
+// linear resample คนละ rate + parabolic บน grid อาจมี systematic lag bias ~+2–3ms
+// (ไม่ใช่ noise สองทาง) — รายงานเป็น uncertainty ไม่ใช่แก้ด้วยค่าคงที่เดา
+const SIGNAL_LAG_SYSTEMATIC_UNCERTAINTY_S = 0.003;
 
 function mean(values) {
   const finite = values.filter(Number.isFinite);
@@ -380,18 +386,31 @@ export function resampleUniform(t, y, dt, t0, t1) {
  * อิสระจาก event detector → residual HS หลัง align นี้วัด detector timing bias ได้
  *
  * - ไม่ค้น polarity (±1): polarity ถูกกำหนดจาก axis map / นิยามมุมแล้ว
- *   ถ้า corr ติดลบ = สัญญาณว่ามีอะไรผิด (ไม่เงียบ flip)
+ * - เช็ค corr ที่ lag≈0 ก่อน: ถ้าติดลบชัด → polarity-mismatch (ห้ามไปเชื่อ sidelobe บวกที่ lag อื่น)
  * - maxLag ต้อง < ครึ่ง stride เพื่อเลี่ยง period aliasing
- * - parabolic interpolation รอบ discrete peak → ~1ms โดยไม่ต้องลด dt ต่อ
+ * - parabolic interpolation รอบ discrete peak — ยังอาจเหลือ systematic bias ~+2–3ms
+ *   จาก linear resample คนละ rate (120 vs 100Hz); อย่าตีความว่าเป็น random error
  *
- * @returns {{ lagS, peakCorr, polarity, ok, ambiguous, rivalPeaks, reason }}
+ * @returns {{ lagS, peakCorr, corrAtZero, polarity, ok, ambiguous, rivalPeaks, reason, systematicUncertaintyS }}
  */
 export function estimateSignalLagS(mocapT, mocapY, imuT, imuY, options = {}) {
   const maxLagS = options.maxLagS ?? DEFAULT_MAX_LAG_S;
   const dt = options.dtS ?? DEFAULT_XCORR_DT_S;
   const minPeakCorr = options.minPeakCorr ?? DEFAULT_MIN_PEAK_CORR;
+  const polarityZeroMax = options.polarityZeroCorrMax ?? POLARITY_ZERO_CORR_MAX;
+  const empty = {
+    lagS: null,
+    peakCorr: null,
+    corrAtZero: null,
+    polarity: 1,
+    ok: false,
+    ambiguous: false,
+    rivalPeaks: [],
+    reason: 'missing-series',
+    systematicUncertaintyS: SIGNAL_LAG_SYSTEMATIC_UNCERTAINTY_S,
+  };
   if (!mocapT?.length || !imuT?.length || mocapT.length !== mocapY.length || imuT.length !== imuY.length) {
-    return { lagS: null, peakCorr: null, polarity: 1, ok: false, ambiguous: false, rivalPeaks: [], reason: 'missing-series' };
+    return empty;
   }
 
   const mocapT0 = minFinite(mocapT);
@@ -399,20 +418,20 @@ export function estimateSignalLagS(mocapT, mocapY, imuT, imuY, options = {}) {
   const mocapT1 = maxFinite(mocapT);
   const imuT1 = maxFinite(imuT);
   if (![mocapT0, imuT0, mocapT1, imuT1].every(Number.isFinite)) {
-    return { lagS: null, peakCorr: null, polarity: 1, ok: false, ambiguous: false, rivalPeaks: [], reason: 'missing-series' };
+    return empty;
   }
 
   const t0 = Math.max(mocapT0, imuT0);
   const t1 = Math.min(mocapT1, imuT1);
   if (!(t1 - t0 >= 1.0)) {
-    return { lagS: null, peakCorr: null, polarity: 1, ok: false, ambiguous: false, rivalPeaks: [], reason: 'overlap-too-short' };
+    return { ...empty, reason: 'overlap-too-short' };
   }
 
   const ref = resampleUniform(mocapT, mocapY, dt, t0, t1);
   const sig = resampleUniform(imuT, imuY, dt, t0, t1);
   const maxLagSamples = Math.min(Math.floor(maxLagS / dt), Math.floor(ref.length / 3));
   if (maxLagSamples < 1 || ref.length < 20) {
-    return { lagS: null, peakCorr: null, polarity: 1, ok: false, ambiguous: false, rivalPeaks: [], reason: 'too-few-samples' };
+    return { ...empty, reason: 'too-few-samples' };
   }
 
   function nccAtLag(lagSamples) {
@@ -457,28 +476,30 @@ export function estimateSignalLagS(mocapT, mocapY, imuT, imuY, options = {}) {
     }
   }
 
+  const corrAtZero = corrByLag.has(0) ? corrByLag.get(0) : nccAtLag(0);
+
   if (!(bestCorr > -Infinity)) {
-    return { lagS: null, peakCorr: null, polarity: 1, ok: false, ambiguous: false, rivalPeaks: [], reason: 'weak-correlation' };
+    return {
+      ...empty,
+      corrAtZero,
+      reason: 'weak-correlation',
+    };
   }
 
-  let mostNegativeCorr = Infinity;
-  for (const corr of corrByLag.values()) {
-    if (corr < mostNegativeCorr) mostNegativeCorr = corr;
-  }
-
-  // polarity คงที่ = +1: ถ้า anti-correlation ชัด (แม้ sidelobe บวกอ่อน ๆ ในช่วง search)
-  // รายงาน inverted — ไม่เงียบ flip และไม่กลืนเป็น weak-correlation
-  const inverted = bestCorr < 0
-    || (bestCorr < minPeakCorr && mostNegativeCorr <= -minPeakCorr);
-  if (inverted) {
+  // สำคัญ: เช็ค polarity ที่ lag≈0 ก่อนเชื่อ peak ที่อื่น
+  // สัญญาณกลับขั้ว + sync offset น้อย ๆ มักได้ sidelobe บวก ~0.6 ที่ lag ≠ 0 ซึ่งผ่าน
+  // minPeakCorr ได้ — ถ้าไม่ดู corr(0) จะเงียบ flip และรายงาน HS timing ผิดทั้ง trial
+  if (Number.isFinite(corrAtZero) && corrAtZero < polarityZeroMax) {
     return {
       lagS: null,
-      peakCorr: mostNegativeCorr < bestCorr ? mostNegativeCorr : bestCorr,
+      peakCorr: bestCorr,
+      corrAtZero,
       polarity: 1,
       ok: false,
       ambiguous: false,
       rivalPeaks: [],
-      reason: 'inverted-polarity',
+      reason: 'polarity-mismatch',
+      systematicUncertaintyS: SIGNAL_LAG_SYSTEMATIC_UNCERTAINTY_S,
     };
   }
 
@@ -486,11 +507,13 @@ export function estimateSignalLagS(mocapT, mocapY, imuT, imuY, options = {}) {
     return {
       lagS: null,
       peakCorr: bestCorr,
+      corrAtZero,
       polarity: 1,
       ok: false,
       ambiguous: false,
       rivalPeaks: [],
       reason: 'weak-correlation',
+      systematicUncertaintyS: SIGNAL_LAG_SYSTEMATIC_UNCERTAINTY_S,
     };
   }
 
@@ -508,6 +531,7 @@ export function estimateSignalLagS(mocapT, mocapY, imuT, imuY, options = {}) {
   const ambiguous = rivalPeaks.length > 0;
 
   // parabolic interpolation รอบ discrete peak → sub-sample lag
+  // หมายเหตุ: ยังอาจเหลือ systematic bias ~+2–3ms จาก linear resample คนละ rate
   const ym1 = corrByLag.get(bestLagSamples - 1);
   const y0 = bestCorr;
   const yp1 = corrByLag.get(bestLagSamples + 1);
@@ -522,11 +546,13 @@ export function estimateSignalLagS(mocapT, mocapY, imuT, imuY, options = {}) {
   return {
     lagS: (bestLagSamples + frac) * dt,
     peakCorr: bestCorr,
+    corrAtZero,
     polarity: 1,
     ok: !ambiguous,
     ambiguous,
     rivalPeaks,
     reason: ambiguous ? 'ambiguous-period-peaks' : null,
+    systematicUncertaintyS: SIGNAL_LAG_SYSTEMATIC_UNCERTAINTY_S,
   };
 }
 
@@ -758,8 +784,8 @@ export function compareMocapToImu(mocap, imuTrace, options = {}) {
         alignOpts.lagS = signalLag.lagS;
         alignOpts.lagSource = 'signal-xcorr';
       } else {
-        const detail = signalLag.reason === 'inverted-polarity'
-          ? 'corr ติดลบ — ตรวจ axis map / นิยามมุม (ไม่เงียบ flip polarity)'
+        const detail = signalLag.reason === 'polarity-mismatch' || signalLag.reason === 'inverted-polarity'
+          ? `corr(0)=${Number.isFinite(signalLag.corrAtZero) ? signalLag.corrAtZero.toFixed(2) : '—'} ติดลบ — ตรวจ axis map / นิยามมุม (ไม่เงียบ flip)`
           : signalLag.reason === 'ambiguous-period-peaks'
             ? `peak ใกล้เคียงกันหลายจุด (rival ${signalLag.rivalPeaks?.slice(0, 3).map((p) => `${p.lagS.toFixed(3)}s`).join(', ')})`
             : signalLag.reason;
@@ -819,6 +845,8 @@ export function compareMocapToImu(mocap, imuTrace, options = {}) {
         lagS: alignment.lagS,
         lagSource: alignment.lagSource,
         signalPeakCorr: signalLag?.ok ? signalLag.peakCorr : null,
+        corrAtZero: signalLag?.corrAtZero ?? null,
+        systematicUncertaintyS: signalLag?.systematicUncertaintyS ?? null,
         pairedCount: alignment.pairs.length,
         unpairedMocap: alignment.unpairedMocap,
         unpairedImu: alignment.unpairedImu,
@@ -872,6 +900,8 @@ export function compareMocapToImu(mocap, imuTrace, options = {}) {
       'Stance% คนละนิยาม event ได้ (MoCap = ankle velocity quiet, IMU = gyro HS/TO)',
       'Align ลำดับ: signal xcorr (mocap ω × IMU gx) ก่อน แล้วค่อย HS-event lag สำหรับจับคู่ cycle',
       'HS timing residual ใช้ได้เฉพาะเมื่อ lagSource=signal-xcorr — ถ้า sync จาก HS events เอง bias ถูกดูดเข้า lag',
+      'Signal xcorr เช็ค corr(lag≈0) ก่อน: ติดลบชัด = polarity-mismatch (ไม่เชื่อ sidelobe บวกที่ lag อื่น)',
+      'Signal lag มี systematic uncertainty ~±3ms จาก linear resample คนละ rate — ไม่ใช่ random ที่เฉลี่ยหาย',
       'sum(stride) ต่อข้าง ≠ ระยะเดินจริงแบบ 1:1 ถ้าสองข้างบันทึกพร้อมกัน (อย่าบวก L+R)',
     ],
   };
