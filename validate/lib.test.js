@@ -11,6 +11,7 @@ import {
   computeDistanceCheck,
   distanceCheckClass,
   computeGlobalT0Ms,
+  detectJsonKind,
   DEFAULT_FLAG_V_END_MPS,
   DEFAULT_FLAG_ACCEL_DEVIATION_G,
 } from './lib.js';
@@ -218,4 +219,12 @@ test('threshold logic: ค่าที่เกิน default ถูก flag, �
 test('computeCyclesBySensor: จัดกลุ่มตาม sensorKey, ใช้ "_" เมื่อไม่มี sensorKey', () => {
   const map = computeCyclesBySensor([cycle({ sensorKey: 'A' }), cycle({ sensorKey: undefined })]);
   assert.deepEqual([...map.keys()].sort(), ['A', '_']);
+});
+
+test('detectJsonKind: mocap vs imu vs unknown', () => {
+  assert.equal(detectJsonKind({ perSide: { L: {}, R: {} }, session: {} }), 'mocap');
+  assert.equal(detectJsonKind({ schemaVersion: 3, samples: [] }), 'imu');
+  assert.equal(detectJsonKind({ cycles: [] }), 'imu');
+  assert.equal(detectJsonKind({ foo: 1 }), 'unknown');
+  assert.equal(detectJsonKind(null), 'unknown');
 });

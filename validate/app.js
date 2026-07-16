@@ -9,7 +9,9 @@ import {
   computeDistanceCheck,
   distanceCheckClass,
   computeGlobalT0Ms,
+  detectJsonKind,
 } from "./lib.js";
+import { compareMocapToImu, summarizeMocapSide } from "../mocap-analysis/compareImuTrace.js";
 
 const COLORS = {
   LEFT_SHANK: { x: "#ef5350", y: "#4caf50", z: "#7c4dff" },
@@ -18,6 +20,9 @@ const COLORS = {
 
 const state = {
   raw: null,
+  mocap: null,
+  imuFileName: null,
+  mocapFileName: null,
   series: null,
   t0BySensor: {},
   globalT0Ms: null,
@@ -33,8 +38,20 @@ const state = {
 };
 
 const els = {
-  dropzone: document.getElementById("dropzone"),
-  fileInput: document.getElementById("fileInput"),
+  imuSlot: document.getElementById("imuSlot"),
+  mocapSlot: document.getElementById("mocapSlot"),
+  imuFileInput: document.getElementById("imuFileInput"),
+  mocapFileInput: document.getElementById("mocapFileInput"),
+  imuPickBtn: document.getElementById("imuPickBtn"),
+  mocapPickBtn: document.getElementById("mocapPickBtn"),
+  imuFileName: document.getElementById("imuFileName"),
+  mocapFileName: document.getElementById("mocapFileName"),
+  compareSection: document.getElementById("compareSection"),
+  compareBadge: document.getElementById("compareBadge"),
+  compareLoading: document.getElementById("compareLoading"),
+  compareBody: document.getElementById("compareBody"),
+  mocapOnlySection: document.getElementById("mocapOnlySection"),
+  mocapOnlyCard: document.getElementById("mocapOnlyCard"),
   content: document.getElementById("content"),
   warnings: document.getElementById("warnings"),
   overviewCard: document.getElementById("overviewCard"),
@@ -56,6 +73,11 @@ const els = {
   resetZoom: document.getElementById("resetZoom"),
   fitWindow: document.getElementById("fitWindow"),
 };
+
+function errorPctClass(errorPct) {
+  if (!Number.isFinite(errorPct)) return "unreliable";
+  return distanceCheckClass(errorPct);
+}
 
 function sideBadgeHtml(side) {
   const cls = side === "L" ? "left" : side === "R" ? "right" : "";
@@ -521,27 +543,223 @@ function renderNote(data) {
   els.noteText.textContent = data.note || "—";
 }
 
+// ========== MoCap summary + MoCap↔IMU compare ==========
+
+function updateSlotUi(kind) {
+  const loaded = kind === "imu" ? Boolean(state.raw) : Boolean(state.mocap);
+  const slot = kind === "imu" ? els.imuSlot : els.mocapSlot;
+  const nameEl = kind === "imu" ? els.imuFileName : els.mocapFileName;
+  const fileName = kind === "imu" ? state.imuFileName : state.mocapFileName;
+  slot.classList.toggle("loaded", loaded);
+  if (loaded && fileName) {
+    nameEl.textContent = fileName;
+    nameEl.classList.remove("hidden");
+  } else {
+    nameEl.classList.add("hidden");
+    nameEl.textContent = "";
+  }
+}
+
+function renderMocapOnly() {
+  if (!state.mocap) {
+    els.mocapOnlySection.classList.add("hidden");
+    return;
+  }
+  // ถ้ามี IMU ด้วย ให้ซ่อน mocap-only (ไปโชว์ใน compare แทน)
+  if (state.raw) {
+    els.mocapOnlySection.classList.add("hidden");
+    return;
+  }
+
+  const m = state.mocap;
+  const L = summarizeMocapSide(m.perSide?.L);
+  const R = summarizeMocapSide(m.perSide?.R);
+
+  els.mocapOnlyCard.innerHTML = `
+    <div class="card-header">
+      <span class="card-title">MoCap Ground Truth <span class="card-badge ok">loaded</span></span>
+    </div>
+    <div class="fact-grid" style="margin-bottom:14px;">
+      ${fact("File", state.mocapFileName || "—")}
+      ${fact("Duration", Number.isFinite(m.session?.durationS) ? `${formatNum(m.session.durationS, 1)} s` : "—")}
+      ${fact("Pelvis net forward", Number.isFinite(m.session?.pelvisNetForwardDisplacementM) ? `${formatNum(m.session.pelvisNetForwardDisplacementM, 3)} m` : "—")}
+      ${fact("Bilateral cadence", Number.isFinite(m.bilateral?.trueCadenceSpm) ? `${formatNum(m.bilateral.trueCadenceSpm, 1)} spm` : "—")}
+      ${fact("sameSideRepeats", formatNum(m.bilateral?.sameSideRepeats ?? 0, 0))}
+    </div>
+    <table class="sensor-table">
+      <thead>
+        <tr><th>Side</th><th>Cycles</th><th>Mean stride</th><th>Mean cadence</th><th>Mean speed</th><th>Mean stance%</th></tr>
+      </thead>
+      <tbody>
+        <tr>
+          <td>${sideBadgeHtml("L")}Left</td>
+          <td>${L.cycleCount}</td>
+          <td>${formatNum(L.meanStrideLengthM, 3)} m</td>
+          <td>${formatNum(L.meanCadenceSpm, 1)}</td>
+          <td>${formatNum(L.meanWalkingSpeedMps, 3)}</td>
+          <td>${formatNum(L.meanStancePct, 1)}</td>
+        </tr>
+        <tr>
+          <td>${sideBadgeHtml("R")}Right</td>
+          <td>${R.cycleCount}</td>
+          <td>${formatNum(R.meanStrideLengthM, 3)} m</td>
+          <td>${formatNum(R.meanCadenceSpm, 1)}</td>
+          <td>${formatNum(R.meanWalkingSpeedMps, 3)}</td>
+          <td>${formatNum(R.meanStancePct, 1)}</td>
+        </tr>
+      </tbody>
+    </table>
+    <p class="chart-hint" style="margin-top:12px;">อัปโหลด IMU trace ด้วยเพื่อเทียบ MoCap ↔ IMU อัตโนมัติ</p>`;
+  els.mocapOnlySection.classList.remove("hidden");
+}
+
+function metricRowHtml(row) {
+  const cls = row.comparable ? errorPctClass(row.errorPct) : "unreliable";
+  return `<tr>
+    <td>${row.metric}</td>
+    <td>${row.unit}</td>
+    <td>${formatNum(row.mocap, 3)}</td>
+    <td>${formatNum(row.imu, 3)}</td>
+    <td>${row.comparable ? formatSigned(row.error, 3) : "—"}</td>
+    <td class="${cls}">${row.comparable ? formatSigned(row.errorPct, 1) + "%" : "—"}</td>
+  </tr>`;
+}
+
+function sideCompareHtml(side, block) {
+  if (!block?.present) {
+    return `<div class="compare-side">
+      <div class="compare-side__title">${sideBadgeHtml(side)}ขา ${side}</div>
+      <div class="empty-note">ไม่มีข้อมูลทั้งสองฝั่ง</div>
+    </div>`;
+  }
+
+  const rows = (block.metrics || []).map(metricRowHtml).join("");
+  return `<div class="compare-side">
+    <div class="compare-side__title">
+      ${sideBadgeHtml(side)}ขา ${side}
+      <span class="card-badge neutral">MoCap ${block.mocap.cycleCount} · IMU ${block.imu.cycleCount}</span>
+    </div>
+    <div class="cycles-table-wrap">
+      <table class="cycles-table compare-table">
+        <thead>
+          <tr><th>Metric</th><th>Unit</th><th>MoCap</th><th>IMU</th><th>Error</th><th>Error %</th></tr>
+        </thead>
+        <tbody>${rows}</tbody>
+      </table>
+    </div>
+  </div>`;
+}
+
+function renderCompareReport(report) {
+  if (!report?.ok) {
+    els.compareBadge.textContent = "failed";
+    els.compareBadge.className = "card-badge bad";
+    els.compareBody.innerHTML = `<div class="empty-note">${report?.error || "เทียบไม่ได้"}</div>`;
+    return;
+  }
+
+  els.compareBadge.textContent = report.imuSource === "reprocess" ? "reprocess" : "trace cycles";
+  els.compareBadge.className = "card-badge ok";
+
+  const warningsHtml = (report.warnings || []).length
+    ? `<div class="warning-banner" style="margin-bottom:14px;">⚠️ ${(report.warnings || []).join(" · ")}</div>`
+    : "";
+
+  const session = report.session || {};
+  const distanceRows = ["L", "R"]
+    .map((side) => {
+      const d = session.distanceBySide?.[side];
+      if (!d || !Number.isFinite(d.imuSumStrideLengthM)) return "";
+      return `<tr>
+        <td>${sideBadgeHtml(side)}${side}</td>
+        <td>${formatNum(d.imuSumStrideLengthM, 3)} m</td>
+        <td class="${errorPctClass(d.vsMocapPelvisNetPct)}">${Number.isFinite(d.vsMocapPelvisNetPct) ? formatSigned(d.vsMocapPelvisNetPct, 1) + "%" : "—"}</td>
+        <td class="${errorPctClass(d.vsGroundTruthPct)}">${Number.isFinite(d.vsGroundTruthPct) ? formatSigned(d.vsGroundTruthPct, 1) + "%" : "—"}</td>
+      </tr>`;
+    })
+    .join("");
+
+  els.compareBody.innerHTML = `
+    ${warningsHtml}
+    <div class="fact-grid" style="margin-bottom:16px;">
+      ${fact("IMU source", report.imuSource)}
+      ${fact("MoCap pelvis net", Number.isFinite(session.mocapPelvisNetForwardM) ? `${formatNum(session.mocapPelvisNetForwardM, 3)} m` : "—")}
+      ${fact("MoCap cadence (bilateral)", Number.isFinite(session.mocapTrueCadenceSpm) ? `${formatNum(session.mocapTrueCadenceSpm, 1)} spm` : "—")}
+      ${fact("IMU ground truth dist.", Number.isFinite(session.imuGroundTruthDistanceM) ? `${formatNum(session.imuGroundTruthDistanceM, 2)} m` : "—", !Number.isFinite(session.imuGroundTruthDistanceM))}
+    </div>
+    <div class="compare-sides">
+      ${sideCompareHtml("L", report.sides.L)}
+      ${sideCompareHtml("R", report.sides.R)}
+    </div>
+    <div style="margin-top:18px;">
+      <div class="card-title" style="margin-bottom:10px;">Distance check (sum stride ต่อข้าง)</div>
+      <table class="sensor-table">
+        <thead>
+          <tr><th>Side</th><th>IMU Σ stride</th><th>vs MoCap net</th><th>vs IMU GT dist</th></tr>
+        </thead>
+        <tbody>${distanceRows || `<tr><td colspan="4" class="fact-value muted">ไม่มีข้อมูล</td></tr>`}</tbody>
+      </table>
+    </div>
+    <ul class="compare-notes">
+      ${(report.notes || []).map((n) => `<li>${n}</li>`).join("")}
+    </ul>`;
+}
+
+async function refreshCompare() {
+  if (!state.raw || !state.mocap) {
+    els.compareSection.classList.add("hidden");
+    return;
+  }
+
+  els.compareSection.classList.remove("hidden");
+  els.compareLoading.classList.remove("hidden");
+  els.compareBody.innerHTML = "";
+  els.compareBadge.textContent = "…";
+  els.compareBadge.className = "card-badge neutral";
+
+  // ให้ UI วาด loading ก่อน reprocess (อาจใช้เวลาสักครู่)
+  await new Promise((r) => window.setTimeout(r, 30));
+
+  let report;
+  try {
+    report = compareMocapToImu(state.mocap, state.raw);
+  } catch (error) {
+    report = { ok: false, error: error?.message || String(error) };
+  }
+
+  els.compareLoading.classList.add("hidden");
+  renderCompareReport(report);
+}
+
 // ========== Load / wire up ==========
 
-function loadPayload(data) {
-  if (!data?.samples?.length) {
-    alert("ไฟล์ไม่มี samples หรือรูปแบบไม่ถูกต้อง");
+function loadImuPayload(data, fileName = null) {
+  if (!data?.samples?.length && !(data?.cycles?.length)) {
+    window.alert("ไฟล์ IMU ไม่มี samples หรือ cycles — รูปแบบไม่ถูกต้อง");
     return;
   }
 
   state.raw = data;
-  readThresholdInputs(); // sync จากค่าที่อยู่ใน input field จริง (single source of truth)
-  state.series = buildSeries(data.samples);
-  state.globalT0Ms = computeGlobalT0Ms(data);
-  const durations = Object.values(state.series).map((s) => s.t[s.t.length - 1] ?? 0);
-  state.tMinSec = 0;
-  state.tMaxSec = Math.max(...durations, 0);
-  state.viewWindowSec = Math.min(30, state.tMaxSec);
-  state.viewStartSec = Math.max(0, state.tMaxSec - state.viewWindowSec);
+  state.imuFileName = fileName;
+  updateSlotUi("imu");
+  readThresholdInputs();
 
-  els.dropzone.classList.add("hidden");
+  if (data.samples?.length) {
+    state.series = buildSeries(data.samples);
+    state.globalT0Ms = computeGlobalT0Ms(data);
+    const durations = Object.values(state.series).map((s) => s.t[s.t.length - 1] ?? 0);
+    state.tMinSec = 0;
+    state.tMaxSec = Math.max(...durations, 0);
+    state.viewWindowSec = Math.min(30, state.tMaxSec || 30);
+    state.viewStartSec = Math.max(0, state.tMaxSec - state.viewWindowSec);
+  } else {
+    state.series = null;
+    state.globalT0Ms = computeGlobalT0Ms(data);
+    state.tMinSec = 0;
+    state.tMaxSec = 0;
+  }
+
   els.content.classList.remove("hidden");
-
   renderWarnings(data);
   renderOverview(data);
   renderSampling(data);
@@ -550,15 +768,89 @@ function loadPayload(data) {
   renderCycles(data);
   renderNote(data);
 
-  syncSliderFromState();
-  renderChart();
-  updateTable();
+  if (state.series) {
+    syncSliderFromState();
+    renderChart();
+    updateTable();
+  }
+
+  renderMocapOnly();
+  void refreshCompare();
 }
 
-async function readFile(file) {
-  const text = await file.text();
-  const data = JSON.parse(text);
-  loadPayload(data);
+function loadMocapPayload(data, fileName = null) {
+  if (!data?.perSide) {
+    window.alert("ไฟล์ MoCap ไม่มี perSide — ควรเป็น *.gait-params.json จาก mocap-analysis/run.js");
+    return;
+  }
+
+  state.mocap = data;
+  state.mocapFileName = fileName;
+  updateSlotUi("mocap");
+  renderMocapOnly();
+  void refreshCompare();
+}
+
+async function ingestJsonFile(file, preferredKind = null) {
+  let data;
+  try {
+    data = JSON.parse(await file.text());
+  } catch {
+    window.alert("อ่าน JSON ไม่ได้ — ไฟล์เสียหรือไม่ใช่ JSON");
+    return;
+  }
+
+  let kind = detectJsonKind(data);
+  if (preferredKind && kind !== "unknown" && kind !== preferredKind) {
+    const ok = window.confirm(
+      `ไฟล์นี้ดูเหมือนเป็น ${kind.toUpperCase()} แต่คุณเลือกช่อง ${preferredKind.toUpperCase()}. โหลดตามชนิดที่ตรวจเจอไหม?`,
+    );
+    if (!ok) return;
+  }
+  if (kind === "unknown") {
+    if (preferredKind === "imu") kind = "imu";
+    else if (preferredKind === "mocap") kind = "mocap";
+    else {
+      window.alert("ไม่รู้จักรูปแบบไฟล์ — ต้องเป็น IMU trace หรือ MoCap gait-params.json");
+      return;
+    }
+  }
+
+  if (kind === "imu") loadImuPayload(data, file.name);
+  else loadMocapPayload(data, file.name);
+}
+
+function wireUploadSlot({ slot, input, pickBtn, kind }) {
+  const openPicker = () => input.click();
+  pickBtn?.addEventListener("click", (e) => {
+    e.stopPropagation();
+    openPicker();
+  });
+  slot?.addEventListener("click", (e) => {
+    if (e.target.closest("button")) return;
+    openPicker();
+  });
+  input?.addEventListener("change", () => {
+    const file = input.files?.[0];
+    if (file) void ingestJsonFile(file, kind);
+  });
+
+  ["dragenter", "dragover"].forEach((type) => {
+    slot?.addEventListener(type, (e) => {
+      e.preventDefault();
+      slot.classList.add("dragover");
+    });
+  });
+  ["dragleave", "drop"].forEach((type) => {
+    slot?.addEventListener(type, (e) => {
+      e.preventDefault();
+      slot.classList.remove("dragover");
+    });
+  });
+  slot?.addEventListener("drop", (e) => {
+    const file = e.dataTransfer?.files?.[0];
+    if (file) void ingestJsonFile(file, kind);
+  });
 }
 
 function wireSegmented(containerId, key, onChange) {
@@ -573,29 +865,17 @@ function wireSegmented(containerId, key, onChange) {
   });
 }
 
-els.dropzone.addEventListener("click", () => els.fileInput.click());
-els.fileInput.addEventListener("change", () => {
-  const file = els.fileInput.files?.[0];
-  if (file) readFile(file);
+wireUploadSlot({
+  slot: els.imuSlot,
+  input: els.imuFileInput,
+  pickBtn: els.imuPickBtn,
+  kind: "imu",
 });
-
-["dragenter", "dragover"].forEach((type) => {
-  els.dropzone.addEventListener(type, (e) => {
-    e.preventDefault();
-    els.dropzone.classList.add("dragover");
-  });
-});
-
-["dragleave", "drop"].forEach((type) => {
-  els.dropzone.addEventListener(type, (e) => {
-    e.preventDefault();
-    els.dropzone.classList.remove("dragover");
-  });
-});
-
-els.dropzone.addEventListener("drop", (e) => {
-  const file = e.dataTransfer?.files?.[0];
-  if (file) readFile(file);
+wireUploadSlot({
+  slot: els.mocapSlot,
+  input: els.mocapFileInput,
+  pickBtn: els.mocapPickBtn,
+  kind: "mocap",
 });
 
 wireSegmented("frameToggle", "frame", () => { renderChart(); updateTable(); });
@@ -609,7 +889,7 @@ wireSegmented("axisToggle", "axis", () => renderChart());
   });
 });
 
-els.timeSlider.addEventListener("input", () => {
+els.timeSlider?.addEventListener("input", () => {
   const maxStart = Math.max(0, state.tMaxSec - state.viewWindowSec);
   const pct = Number(els.timeSlider.value) / 100;
   state.viewStartSec = maxStart * pct;
@@ -618,7 +898,7 @@ els.timeSlider.addEventListener("input", () => {
   updateTable();
 });
 
-els.resetZoom.addEventListener("click", () => {
+els.resetZoom?.addEventListener("click", () => {
   state.viewStartSec = 0;
   state.viewWindowSec = state.tMaxSec;
   syncSliderFromState();
@@ -626,7 +906,7 @@ els.resetZoom.addEventListener("click", () => {
   updateTable();
 });
 
-els.fitWindow.addEventListener("click", () => {
+els.fitWindow?.addEventListener("click", () => {
   state.viewWindowSec = Math.min(30, state.tMaxSec);
   state.viewStartSec = Math.max(0, state.tMaxSec - state.viewWindowSec);
   syncSliderFromState();
@@ -634,19 +914,22 @@ els.fitWindow.addEventListener("click", () => {
   updateTable();
 });
 
-els.chart.on("plotly_relayout", (event) => {
-  const x0 = event["xaxis.range[0]"] ?? event["xaxis.range"]?.[0];
-  const x1 = event["xaxis.range[1]"] ?? event["xaxis.range"]?.[1];
-  if (x0 == null || x1 == null) return;
-  state.viewStartSec = Math.max(0, x0);
-  state.viewWindowSec = Math.max(1, x1 - x0);
-  syncSliderFromState();
-  updateTable();
-});
+// Plotly ใช้ on() ไม่ใช่ addEventListener
+if (els.chart && typeof els.chart.on === "function") {
+  els.chart.on("plotly_relayout", (event) => {
+    const x0 = event["xaxis.range[0]"] ?? event["xaxis.range"]?.[0];
+    const x1 = event["xaxis.range[1]"] ?? event["xaxis.range"]?.[1];
+    if (x0 == null || x1 == null) return;
+    state.viewStartSec = Math.max(0, x0);
+    state.viewWindowSec = Math.max(1, x1 - x0);
+    syncSliderFromState();
+    updateTable();
+  });
+}
 
 // เผื่อมีไฟล์ตัวอย่างวางไว้ข้าง ๆ (เปิดผ่าน dev server เท่านั้น — file:// จะ fetch ไม่ได้)
 const defaultFile = "gait-trace-20260715-215837.json";
 fetch(defaultFile)
   .then((res) => (res.ok ? res.json() : null))
-  .then((data) => { if (data) loadPayload(data); })
+  .then((data) => { if (data) loadImuPayload(data, defaultFile); })
   .catch(() => {});

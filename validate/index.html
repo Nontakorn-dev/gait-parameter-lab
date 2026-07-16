@@ -13,27 +13,61 @@
       <span class="header__dot"></span>
       <div>
         <h1>Gait Trace Validator</h1>
-        <p>อัปโหลดไฟล์ trace ที่ export มา แล้วตรวจสอบ header/ZUPT/ระยะเทียบ ground truth</p>
+        <p>อัปโหลด IMU trace และ/หรือ MoCap JSON แล้วตรวจ ZUPT · ระยะ · เทียบ ground truth</p>
       </div>
     </div>
     <div class="header__actions">
-      <label class="btn primary">
-        <input type="file" id="fileInput" accept=".json,application/json" hidden />
-        เลือกไฟล์
-      </label>
       <a class="btn" href="/">← Main</a>
       <a class="btn" href="/debug/">Swing Test</a>
     </div>
   </header>
 
   <main class="main-container">
-    <section class="dropzone" id="dropzone">
-      <div class="dropzone__inner">
-        <div class="dropzone__icon">📂</div>
-        <p class="dropzone__title">ลากไฟล์ <code>gait-trace-*.json</code> มาวางที่นี่</p>
-        <p class="dropzone__hint">หรือคลิกเพื่อเลือกไฟล์ · รองรับ trace ทั้ง schema v2 (เก่า, ไม่มี cycles) และ v3</p>
+    <section class="upload-panel" id="uploadPanel">
+      <div class="upload-grid">
+        <div class="upload-slot" id="imuSlot" data-kind="imu" tabindex="0">
+          <input type="file" id="imuFileInput" accept=".json,application/json" hidden />
+          <div class="upload-slot__status" id="imuStatus">
+            <span class="upload-slot__badge">1</span>
+            <div>
+              <div class="upload-slot__title">IMU Trace</div>
+              <div class="upload-slot__hint">ไฟล์ <code>gait-trace-*.json</code> จาก Dashboard → Export</div>
+            </div>
+          </div>
+          <div class="upload-slot__file hidden" id="imuFileName"></div>
+          <button type="button" class="btn upload-slot__btn" id="imuPickBtn">เลือกไฟล์ IMU</button>
+        </div>
+
+        <div class="upload-slot" id="mocapSlot" data-kind="mocap" tabindex="0">
+          <input type="file" id="mocapFileInput" accept=".json,application/json" hidden />
+          <div class="upload-slot__status" id="mocapStatus">
+            <span class="upload-slot__badge">2</span>
+            <div>
+              <div class="upload-slot__title">MoCap Ground Truth</div>
+              <div class="upload-slot__hint">ไฟล์ <code>*.gait-params.json</code> จาก <code>mocap-analysis/run.js</code></div>
+            </div>
+          </div>
+          <div class="upload-slot__file hidden" id="mocapFileName"></div>
+          <button type="button" class="btn upload-slot__btn" id="mocapPickBtn">เลือกไฟล์ MoCap</button>
+        </div>
       </div>
+      <p class="upload-panel__note">
+        อัปโหลดอย่างใดอย่างหนึ่งเพื่อดูรายละเอียด · อัปโหลดครบทั้งคู่เพื่อเทียบ MoCap ↔ IMU บนหน้านี้
+      </p>
     </section>
+
+    <div id="compareSection" class="content hidden">
+      <section class="card" id="compareCard">
+        <div class="card-header">
+          <span class="card-title">
+            MoCap ↔ IMU Comparison
+            <span class="card-badge neutral" id="compareBadge">—</span>
+          </span>
+        </div>
+        <div id="compareLoading" class="empty-note hidden">กำลัง reprocess IMU trace…</div>
+        <div id="compareBody"></div>
+      </section>
+    </div>
 
     <div id="content" class="content hidden">
       <div id="warnings"></div>
@@ -138,6 +172,10 @@
         <div class="card-header"><span class="card-title">Note (จาก header ของไฟล์)</span></div>
         <p class="note-text" id="noteText"></p>
       </section>
+    </div>
+
+    <div id="mocapOnlySection" class="content hidden">
+      <section class="card" id="mocapOnlyCard"></section>
     </div>
   </main>
 

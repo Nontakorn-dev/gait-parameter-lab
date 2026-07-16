@@ -161,3 +161,11 @@ export function computeGlobalT0Ms(data) {
   const cycleTimes = (data.cycles || []).map((c) => c.cycleStartTimestampMs).filter(Number.isFinite);
   return cycleTimes.length ? minFinite(cycleTimes) : 0;
 }
+
+/** แยกชนิดไฟล์จาก JSON — IMU trace vs MoCap gait-params */
+export function detectJsonKind(data) {
+  if (!data || typeof data !== "object") return "unknown";
+  if (data.perSide && (data.forwardAxis || data.bilateral || data.session)) return "mocap";
+  if (Array.isArray(data.samples) || data.schemaVersion != null || Array.isArray(data.cycles)) return "imu";
+  return "unknown";
+}
