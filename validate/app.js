@@ -1,6 +1,6 @@
 import {
-  FLAG_V_END_MPS,
-  FLAG_ACCEL_DEVIATION_G,
+  DEFAULT_FLAG_V_END_MPS,
+  DEFAULT_FLAG_ACCEL_DEVIATION_G,
   formatNum,
   formatSigned,
   formatDate,
@@ -28,6 +28,8 @@ const state = {
   viewWindowSec: 30,
   tMinSec: 0,
   tMaxSec: 0,
+  // threshold ปรับได้จาก UI — ค่าเริ่มต้นเป็นแค่ placeholder ที่ยังไม่ผ่านการยืนยันด้วยข้อมูลจริง
+  zuptThresholds: { vEndMps: DEFAULT_FLAG_V_END_MPS, accelDeviationG: DEFAULT_FLAG_ACCEL_DEVIATION_G },
 };
 
 const els = {
@@ -42,6 +44,8 @@ const els = {
   cyclesBadge: document.getElementById("cyclesBadge"),
   cyclesSummary: document.getElementById("cyclesSummary"),
   cyclesTableWrap: document.getElementById("cyclesTableWrap"),
+  thresholdVEnd: document.getElementById("thresholdVEnd"),
+  thresholdAccelDev: document.getElementById("thresholdAccelDev"),
   noteText: document.getElementById("noteText"),
   chart: document.getElementById("chart"),
   chartTitle: document.getElementById("chartTitle"),
@@ -389,9 +393,12 @@ function renderGroundTruth(data) {
       ${check.perSensor
         .map((p) => {
           const cls = distanceCheckClass(p.errorPct);
+          const noDataNote = p.noDataCount > 0
+            ? ` <span class="flag-bad">(${p.noDataCount} cycle ไม่มีข้อมูล — ไม่รวมใน sum, error% อาจไม่แม่น)</span>`
+            : "";
           return `<div class="distance-check__stat">
             <div class="distance-check__value ${cls}">${formatSigned(p.errorPct, 1)}%</div>
-            <div class="distance-check__label">${sensorLabel(p.sensorKey, p.side)} · sum ${formatNum(p.sumStrideLengthM, 2)}m / ${p.cycleCount} cycles</div>
+            <div class="distance-check__label">${sensorLabel(p.sensorKey, p.side)} · sum ${formatNum(p.sumStrideLengthM, 2)}m / ${p.cycleCount} cycles${noDataNote}</div>
           </div>`;
         })
         .join("")}
@@ -416,13 +423,19 @@ function renderGroundTruth(data) {
     ${distanceHtml}`;
 }
 
-function cycleRowHtml(c, globalT0Ms) {
+function cycleRowHtml(c, globalT0Ms, thresholds) {
   const zc = c.zuptCheck || {};
-  const vEndFlag = Math.abs(zc.vEndPreDrift ?? 0) > FLAG_V_END_MPS;
-  const devFlag = (zc.zuptAccelDeviationG ?? 0) > FLAG_ACCEL_DEVIATION_G;
+  const hasVEnd = Number.isFinite(zc.vEndPreDrift);
+  const hasDev = Number.isFinite(zc.zuptAccelDeviationG);
+  const vEndFlag = hasVEnd && Math.abs(zc.vEndPreDrift) > thresholds.vEndMps;
+  const devFlag = hasDev && zc.zuptAccelDeviationG > thresholds.accelDeviationG;
   const tSec = Number.isFinite(c.cycleStartTimestampMs) && Number.isFinite(globalT0Ms)
     ? ((c.cycleStartTimestampMs - globalT0Ms) / 1000).toFixed(2)
     : "—";
+  // ไม่มีข้อมูล (null จริงจาก processor) ต้องแยกจาก "ผ่านเกณฑ์" อย่างชัดเจน — ไม่ใช้ flag-ok
+  // เพราะนั่นจะอ่านผิดว่า ZUPT ดี ทั้งที่จริงคือวัดไม่ได้เลย
+  const vEndCellClass = !hasVEnd ? "clamped" : vEndFlag ? "flag-bad" : "flag-ok";
+  const devCellClass = !hasDev ? "clamped" : devFlag ? "flag-bad" : "flag-ok";
   return `<tr>
     <td>${sideBadgeHtml(c.side)}${c.sensorKey ?? "—"}</td>
     <td>${tSec}</td>
@@ -430,15 +443,24 @@ function cycleRowHtml(c, globalT0Ms) {
     <td>${formatNum(c.strideLengthM, 3)}</td>
     <td class="${c.strideLengthClamped ? "clamped" : ""}">${c.strideLengthClamped ? "clamped" : "—"}</td>
     <td>${formatSigned(zc.vStartPreDrift, 3)}</td>
-    <td class="${vEndFlag ? "flag-bad" : "flag-ok"}">${formatSigned(zc.vEndPreDrift, 3)}</td>
+    <td class="${vEndCellClass}">${hasVEnd ? formatSigned(zc.vEndPreDrift, 3) : "no data"}</td>
     <td>${zc.windowSource ?? "—"}</td>
-    <td class="${devFlag ? "flag-bad" : "flag-ok"}">${formatNum(zc.zuptAccelDeviationG, 3)}</td>
+    <td class="${devCellClass}">${hasDev ? formatNum(zc.zuptAccelDeviationG, 3) : "no data"}</td>
   </tr>`;
+}
+
+function readThresholdInputs() {
+  const vEnd = Number.parseFloat(els.thresholdVEnd?.value);
+  const accelDev = Number.parseFloat(els.thresholdAccelDev?.value);
+  state.zuptThresholds = {
+    vEndMps: Number.isFinite(vEnd) && vEnd > 0 ? vEnd : DEFAULT_FLAG_V_END_MPS,
+    accelDeviationG: Number.isFinite(accelDev) && accelDev > 0 ? accelDev : DEFAULT_FLAG_ACCEL_DEVIATION_G,
+  };
 }
 
 function renderCycles(data) {
   const cycles = data.cycles;
-  const summary = summarizeCycles(cycles);
+  const summary = summarizeCycles(cycles, state.zuptThresholds);
 
   if (!summary) {
     els.cyclesBadge.textContent = "0 cycles";
@@ -461,17 +483,22 @@ function renderCycles(data) {
   els.cyclesSummary.innerHTML = `
     <div class="stat-tile"><div class="stat-tile__value">${summary.count}</div><div class="stat-tile__label">Cycles</div></div>
     <div class="stat-tile"><div class="stat-tile__value" style="color:${summary.flaggedCount ? "#c62828" : "#2e7d32"}">${summary.flaggedCount}</div><div class="stat-tile__label">Flagged ZUPT</div></div>
+    <div class="stat-tile"><div class="stat-tile__value" style="color:${summary.noZuptDataCount ? "#e65100" : "#212121"}">${summary.noZuptDataCount}</div><div class="stat-tile__label">No ZUPT data</div></div>
     <div class="stat-tile"><div class="stat-tile__value" style="color:${summary.clampedCount ? "#e65100" : "#212121"}">${summary.clampedCount}</div><div class="stat-tile__label">Clamped</div></div>
-    <div class="stat-tile"><div class="stat-tile__value">${formatNum(summary.meanAbsVEnd, 3)}</div><div class="stat-tile__label">Mean |vEnd| m/s</div></div>
-    <div class="stat-tile"><div class="stat-tile__value">${formatNum(summary.meanZuptAccelDeviationG, 3)}</div><div class="stat-tile__label">Mean accelDev g</div></div>`;
+    <div class="stat-tile"><div class="stat-tile__value">${formatNum(summary.meanAbsVEnd, 3)}</div><div class="stat-tile__label">Mean |vEnd| m/s${summary.noZuptDataCount ? " *" : ""}</div></div>
+    <div class="stat-tile"><div class="stat-tile__value">${formatNum(summary.meanZuptAccelDeviationG, 3)}</div><div class="stat-tile__label">Mean accelDev g${summary.noZuptDataCount ? " *" : ""}</div></div>`;
 
   const globalT0Ms = state.globalT0Ms;
-  const rows = cycles.map((c) => cycleRowHtml(c, globalT0Ms)).join("");
+  const rows = cycles.map((c) => cycleRowHtml(c, globalT0Ms, state.zuptThresholds)).join("");
+  const meanNote = summary.noZuptDataCount
+    ? `<br>* ค่าเฉลี่ยคำนวณจาก cycle ที่มีข้อมูลจริงเท่านั้น (ไม่รวม ${summary.noZuptDataCount} cycle ที่ "no data")`
+    : "";
 
   els.cyclesTableWrap.innerHTML = `
     <p class="chart-hint" style="margin:0 0 10px;">
       Window source: ${sourceBreakdown || "—"} ·
-      flag เมื่อ |vEndPreDrift| &gt; ${FLAG_V_END_MPS} m/s หรือ zuptAccelDeviationG &gt; ${FLAG_ACCEL_DEVIATION_G} g
+      flag เมื่อ |vEndPreDrift| &gt; ${state.zuptThresholds.vEndMps} m/s หรือ zuptAccelDeviationG &gt; ${state.zuptThresholds.accelDeviationG} g
+      (ค่า default ยังไม่ผ่านการยืนยันด้วยข้อมูลเดินจริง — ปรับได้ที่ช่องด้านบน)${meanNote}
     </p>
     <div class="cycles-table-wrap">
       <table class="cycles-table">
@@ -499,6 +526,7 @@ function loadPayload(data) {
   }
 
   state.raw = data;
+  readThresholdInputs(); // sync จากค่าที่อยู่ใน input field จริง (single source of truth)
   state.series = buildSeries(data.samples);
   state.globalT0Ms = computeGlobalT0Ms(data);
   const durations = Object.values(state.series).map((s) => s.t[s.t.length - 1] ?? 0);
@@ -569,6 +597,13 @@ els.dropzone.addEventListener("drop", (e) => {
 wireSegmented("frameToggle", "frame", () => { renderChart(); updateTable(); });
 wireSegmented("sensorToggle", "sensor", () => { renderChart(); updateTable(); });
 wireSegmented("axisToggle", "axis", () => renderChart());
+
+[els.thresholdVEnd, els.thresholdAccelDev].forEach((input) => {
+  input?.addEventListener("input", () => {
+    readThresholdInputs();
+    if (state.raw) renderCycles(state.raw);
+  });
+});
 
 els.timeSlider.addEventListener("input", () => {
   const maxStart = Math.max(0, state.tMaxSec - state.viewWindowSec);

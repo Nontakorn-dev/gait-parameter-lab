@@ -1,8 +1,5 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { readFileSync } from 'node:fs';
-import { fileURLToPath } from 'node:url';
-import path from 'node:path';
 
 import {
   formatNum,
@@ -14,11 +11,9 @@ import {
   computeDistanceCheck,
   distanceCheckClass,
   computeGlobalT0Ms,
-  FLAG_V_END_MPS,
-  FLAG_ACCEL_DEVIATION_G,
+  DEFAULT_FLAG_V_END_MPS,
+  DEFAULT_FLAG_ACCEL_DEVIATION_G,
 } from './lib.js';
-
-const __dirname = path.dirname(fileURLToPath(import.meta.url));
 
 function cycle(overrides = {}) {
   return {
@@ -30,6 +25,39 @@ function cycle(overrides = {}) {
     sensorKey: 'LEFT_SHANK',
     side: 'L',
     ...overrides,
+  };
+}
+
+// สร้าง object แทนการอ่านไฟล์ trace จริงที่ .gitignore ไว้ (validate/*.json) — ไฟล์นั้นมีแค่ในเครื่อง
+// ผู้บันทึก ไม่อยู่ใน repo จึงทำให้เทสต์ fail ที่เครื่องอื่น/CI เสมอ (ยืนยันแล้ว: ENOENT ทันทีที่ไฟล์หาย)
+// object นี้จำลอง shape ของไฟล์จริงที่เคยเจอ: schema v2, ไม่มี cycles[] เลย (ก่อน schema v3)
+function buildLegacyV2TraceFixture() {
+  return {
+    schemaVersion: 2,
+    recordedAt: '2026-07-15T14:57:54.601Z',
+    exportedAt: '2026-07-15T14:58:37.119Z',
+    app: 'gait-parameter-lab',
+    appVersion: '1.0.0',
+    firmwareBuildTag: null,
+    source: 'live',
+    hasSensorFrameRaw: true,
+    truncated: false,
+    sampleRateHzNominal: 100,
+    sampleRateHzMeasured: 100.01,
+    sampleRateHzBySensor: { LEFT_SHANK: 100.02, RIGHT_SHANK: 100 },
+    droppedBySensor: { LEFT_SHANK: 0, RIGHT_SHANK: 0 },
+    seqDiscontinuitiesBySensor: { LEFT_SHANK: 0, RIGHT_SHANK: 0 },
+    sampleCount: 5,
+    packetVersionBySensor: { LEFT_SHANK: 1, RIGHT_SHANK: 1 },
+    calibrationBySensor: {},
+    groundTruth: { distanceM: 10, stepCountManual: 5, notes: null },
+    note: 'raw_accel_sensor / raw_gyro_sensor are PRE axis-remap...',
+    // ไม่มี cycles / cycleCount / cyclesTruncated เลย — ตรงกับไฟล์จริงที่เคยเจอ
+    samples: [
+      { t_ms: 3843888.028, seq: 56622, sensorKey: 'LEFT_SHANK', side: 'L', sensorMount: 'shank', raw_accel_sensor: [-216, -4167, -766], raw_gyro_sensor: [293, 34, -12], raw_accel_canonical: [-216, -4167, -766], raw_gyro_canonical: [293, 34, -12] },
+      { t_ms: 3843898.028, seq: 56623, sensorKey: 'LEFT_SHANK', side: 'L', sensorMount: 'shank', raw_accel_sensor: [-210, -4160, -760], raw_gyro_sensor: [290, 30, -10], raw_accel_canonical: [-210, -4160, -760], raw_gyro_canonical: [290, 30, -10] },
+      { t_ms: 3843888.028, seq: 71001, sensorKey: 'RIGHT_SHANK', side: 'R', sensorMount: 'shank', raw_accel_sensor: [200, -4100, -700], raw_gyro_sensor: [280, 20, -8], raw_accel_canonical: [200, -4100, -700], raw_gyro_canonical: [280, 20, -8] },
+    ],
   };
 }
 
@@ -55,15 +83,38 @@ test('summarizeCycles: null เมื่อไม่มี cycle เลย (ไ�
   assert.equal(summarizeCycles([]), null);
 });
 
-test('summarizeCycles: flag cycle ที่ |vEndPreDrift| หรือ zuptAccelDeviationG เกิน threshold', () => {
+test('summarizeCycles: flag cycle ที่ |vEndPreDrift| หรือ zuptAccelDeviationG เกิน threshold (ค่า default)', () => {
   const cycles = [
-    cycle({ cycleKey: 'a', zuptCheck: { vStartPreDrift: 0, vEndPreDrift: -0.79, windowSource: 'post-peak-valley', zuptAccelDeviationG: 0.21 } }),
+    cycle({ cycleKey: 'a', zuptCheck: { vStartPreDrift: 0, vEndPreDrift: -0.9, windowSource: 'post-peak-valley', zuptAccelDeviationG: 0.3 } }),
     cycle({ cycleKey: 'b', zuptCheck: { vStartPreDrift: 0, vEndPreDrift: 0.01, windowSource: 'post-peak-valley', zuptAccelDeviationG: 0.02 } }),
   ];
   const s = summarizeCycles(cycles);
   assert.equal(s.count, 2);
-  assert.equal(s.flaggedCount, 1, 'มีแค่ cycle a ที่เกิน threshold (vEnd=0.79 > 0.15)');
-  assert.ok(Math.abs(s.meanAbsVEnd - (0.79 + 0.01) / 2) < 1e-9);
+  assert.equal(s.flaggedCount, 1, 'มีแค่ cycle a ที่เกิน threshold default (0.9 > 0.15)');
+});
+
+test('summarizeCycles: threshold ปรับเองได้ (ไม่ผูกกับค่า default ตายตัว)', () => {
+  const cycles = [cycle({ zuptCheck: { vStartPreDrift: 0, vEndPreDrift: 0.2, windowSource: 'x', zuptAccelDeviationG: 0.05 } })];
+  const strict = summarizeCycles(cycles, { vEndMps: 0.1, accelDeviationG: 0.5 });
+  const loose = summarizeCycles(cycles, { vEndMps: 0.5, accelDeviationG: 0.5 });
+  assert.equal(strict.flaggedCount, 1, 'threshold เข้มกว่า (0.1) ต้อง flag ที่ vEnd=0.2');
+  assert.equal(loose.flaggedCount, 0, 'threshold หลวมกว่า (0.5) ต้องไม่ flag');
+});
+
+test('regression: cycle ที่ vEndPreDrift/zuptAccelDeviationG เป็น null ต้องไม่ถูกนับเป็น 0 ในค่าเฉลี่ย', () => {
+  // เคสที่เคย fail จริง: 2 cycle แย่ (vEnd 0.9/0.8) + 1 cycle ไม่มีข้อมูลเลย (null)
+  const cycles = [
+    cycle({ cycleKey: '1', zuptCheck: { vStartPreDrift: 0, vEndPreDrift: -0.9, windowSource: 'x', zuptAccelDeviationG: 0.3 } }),
+    cycle({ cycleKey: '2', zuptCheck: { vStartPreDrift: 0, vEndPreDrift: -0.8, windowSource: 'x', zuptAccelDeviationG: 0.3 } }),
+    cycle({ cycleKey: '3', zuptCheck: { vStartPreDrift: null, vEndPreDrift: null, windowSource: 'x', zuptAccelDeviationG: null } }),
+  ];
+  const s = summarizeCycles(cycles);
+
+  // ก่อนแก้: (0.9+0.8+0)/3 = 0.5667 (null ถูกนับเป็น 0 = "ZUPT สมบูรณ์แบบ")
+  // หลังแก้: เฉลี่ยจากแค่ 2 cycle ที่มีข้อมูลจริง = (0.9+0.8)/2 = 0.85
+  assert.ok(Math.abs(s.meanAbsVEnd - 0.85) < 1e-9, `meanAbsVEnd=${s.meanAbsVEnd} ควรเป็น 0.85 ไม่ใช่ 0.567`);
+  assert.equal(s.noZuptDataCount, 1, 'cycle ที่ null ต้องถูกนับแยกเป็น noZuptDataCount ไม่ใช่หายเงียบ ๆ');
+  assert.equal(s.flaggedCount, 2, 'cycle ที่ไม่มีข้อมูลต้องไม่ถูกนับเป็น flagged (แยกจาก noZuptDataCount)');
 });
 
 test('summarizeCycles: นับ clampedCount และ sourceCounts ต่อ windowSource', () => {
@@ -98,6 +149,19 @@ test('computeDistanceCheck: รวม strideLengthM ต่อเซนเซอ�
   assert.ok(Math.abs(right.errorPct - -55) < 1e-9, '0.9 vs 2.0 -> -55%');
 });
 
+test('regression: cycle ที่ strideLengthM เป็น null ต้องไม่ถูกนับเป็น 0 ในผลรวมระยะ (แยกเป็น noDataCount)', () => {
+  const cycles = [
+    cycle({ sensorKey: 'LEFT_SHANK', strideLengthM: 1.0 }),
+    cycle({ sensorKey: 'LEFT_SHANK', strideLengthM: 1.0 }),
+    cycle({ sensorKey: 'LEFT_SHANK', strideLengthM: null }),
+  ];
+  const result = computeDistanceCheck({ cycles, groundTruth: { distanceM: 2.0 } });
+  const left = result.perSensor.find((p) => p.sensorKey === 'LEFT_SHANK');
+  assert.ok(Math.abs(left.sumStrideLengthM - 2.0) < 1e-9, 'sum ต้องนับแค่ 2 cycle ที่มีข้อมูลจริง = 2.0 ไม่ใช่ปนศูนย์');
+  assert.equal(left.noDataCount, 1);
+  assert.equal(left.cycleCount, 3, 'cycleCount ยังนับรวมทุก cycle (แค่ sum ไม่รวม null)');
+});
+
 test('distanceCheckClass: จัดระดับ ok/warn/bad ตาม % error', () => {
   assert.equal(distanceCheckClass(5), 'ok');
   assert.equal(distanceCheckClass(-9.9), 'ok');
@@ -112,11 +176,23 @@ test('computeGlobalT0Ms: ใช้ min ของ sample.t_ms, fallback เป็
   assert.equal(computeGlobalT0Ms({ samples: [], cycles: [] }), 0);
 });
 
-test('เทียบกับไฟล์ trace จริงที่ผู้ใช้ export มา: ไม่มี cycles เลย (schema เก่ากว่า v3) — ต้องไม่ throw', () => {
-  const file = path.join(__dirname, 'gait-trace-20260715-215837.json');
-  const data = JSON.parse(readFileSync(file, 'utf8'));
+test('regression: computeGlobalT0Ms ไม่ throw RangeError กับ trace ยาวถึง maxSamples cap (300,000)', () => {
+  // ยืนยันแล้วว่า Math.min(...array) ทำ "Maximum call stack size exceeded" ที่ ~150,000 element
+  // (ทดสอบ raw Math.min(...) ตรง ๆ ก่อนแก้เจอ crash ที่ 150k และ 300k) — เดิน >4 นาที ที่ 2 เซนเซอร์
+  // 100Hz ก็แตะ cap นี้ได้แล้ว จึงต้องทดสอบที่ขนาดจริงของ cap ไม่ใช่แค่ขนาดเล็ก
+  for (const n of [150000, 300000]) {
+    const samples = Array.from({ length: n }, (_, i) => ({ t_ms: n - i })); // min อยู่ท้ายอาเรย์โดยตั้งใจ
+    assert.doesNotThrow(() => {
+      const t0 = computeGlobalT0Ms({ samples });
+      assert.equal(t0, 1, `n=${n}: t0 ควรเป็น min จริง (1) ไม่ใช่ NaN/Infinity`);
+    }, `n=${n} ต้องไม่ throw RangeError`);
+  }
+});
 
-  assert.equal(data.schemaVersion, 2, 'ไฟล์ตัวอย่างนี้เก็บมาก่อน schema v3 (ไม่มี cycles[])');
+test('เทียบกับ shape ของไฟล์ trace จริงที่เคยเจอ: ไม่มี cycles เลย (schema เก่ากว่า v3) — ต้องไม่ throw', () => {
+  const data = buildLegacyV2TraceFixture();
+
+  assert.equal(data.schemaVersion, 2);
   assert.equal('cycles' in data, false);
 
   // validator ต้องรับมือ edge case นี้ได้อย่างสง่างาม ไม่ throw
@@ -127,10 +203,19 @@ test('เทียบกับไฟล์ trace จริงที่ผู้�
 
   const t0 = computeGlobalT0Ms(data);
   assert.ok(Number.isFinite(t0) && t0 > 0, 'คำนวณ t0 จาก samples จริงได้');
-  assert.equal(data.sampleCount, 6250);
 });
 
-test('threshold ที่ใช้จริงตรงกับตัวอย่างที่วิเคราะห์ไว้ในบทสนทนา (v_end~0.79, accelDev~0.21)', () => {
-  assert.ok(0.79 > FLAG_V_END_MPS, 'เคสที่เคยยืนยันว่า ZUPT วางผิดจุดต้องโดน flag');
-  assert.ok(0.21 < FLAG_ACCEL_DEVIATION_G, 'accelDev เดี่ยว ๆ ไม่เกิน threshold นี้ แต่ vEnd เกินพอให้ flag ได้');
+// หมายเหตุความซื่อสัตย์: threshold ด้านล่างเป็นค่า default ที่ตั้งไว้ตอนพัฒนา *ยังไม่เคยผ่านการ
+// ยืนยันด้วยข้อมูลเดินจริง* ตัวเลขตัวอย่าง (vEnd~0.79, accelDev~0.21) มาจาก "demo" สังเคราะห์ระหว่าง
+// พัฒนา ไม่ใช่ ground truth — เทสต์นี้ตรวจแค่ "ตรรกะ flag ทำงานถูกกับค่า default ปัจจุบัน" เท่านั้น
+// ไม่ได้อ้างว่า ZUPT วางผิดจุดถูกพิสูจน์แล้ว (นั่นต้องรอ trace จริงที่มี ground-truth distance)
+test('threshold logic: ค่าที่เกิน default ถูก flag, ค่าที่ต่ำกว่าไม่ถูก flag (ทดสอบตรรกะ ไม่ใช่ยืนยัน ground truth)', () => {
+  assert.ok(0.79 > DEFAULT_FLAG_V_END_MPS, 'ตรรกะ: ค่าที่เกิน default ต้องโดน flag ได้');
+  assert.ok(0.05 < DEFAULT_FLAG_V_END_MPS, 'ตรรกะ: ค่าที่ต่ำกว่า default ต้องไม่ถูก flag');
+  assert.ok(DEFAULT_FLAG_ACCEL_DEVIATION_G > 0, 'threshold ต้องเป็นบวก');
+});
+
+test('computeCyclesBySensor: จัดกลุ่มตาม sensorKey, ใช้ "_" เมื่อไม่มี sensorKey', () => {
+  const map = computeCyclesBySensor([cycle({ sensorKey: 'A' }), cycle({ sensorKey: undefined })]);
+  assert.deepEqual([...map.keys()].sort(), ['A', '_']);
 });

@@ -50,6 +50,20 @@
         <div class="card-header">
           <span class="card-title">ZUPT / Cycle Diagnostics <span class="card-badge neutral" id="cyclesBadge">—</span></span>
         </div>
+        <p class="empty-note" style="margin-bottom:14px;">
+          ⚠️ threshold ด้านล่างเป็นแค่ค่าเริ่มต้นที่ตั้งไว้ตอนพัฒนา <b>ยังไม่ผ่านการยืนยันด้วยข้อมูลเดินจริง</b> —
+          ปรับตามที่เหมาะกับข้อมูลของคุณเองได้
+        </p>
+        <div class="controls" style="margin-bottom:14px;">
+          <div class="control-group">
+            <span class="control-label">Flag |vEnd| &gt; (m/s)</span>
+            <input type="number" id="thresholdVEnd" step="0.01" min="0" value="0.15" style="width:100px;padding:6px 10px;border:1px solid var(--border-light);border-radius:8px;" />
+          </div>
+          <div class="control-group">
+            <span class="control-label">Flag accelDev &gt; (g)</span>
+            <input type="number" id="thresholdAccelDev" step="0.01" min="0" value="0.25" style="width:100px;padding:6px 10px;border:1px solid var(--border-light);border-radius:8px;" />
+          </div>
+        </div>
         <div id="cyclesSummary" class="cycles-summary"></div>
         <div id="cyclesTableWrap"></div>
       </section>
