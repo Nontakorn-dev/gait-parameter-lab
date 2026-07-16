@@ -5,3 +5,7 @@ dist/
 
 # personal gait/calibration trace files exported for validation — not repo sample data
 validate/*.json
+
+# real mocap capture files (personal motion data) — not repo sample data
+mocap.csv
+*.gait-params.json
