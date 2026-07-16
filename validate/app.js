@@ -633,12 +633,22 @@ function sideCompareHtml(side, block) {
     </div>`;
   }
 
-  const rows = (block.metrics || []).map(metricRowHtml).join("");
-  return `<div class="compare-side">
+    const rows = (block.metrics || []).map(metricRowHtml).join("");
+    const align = block.alignment;
+    const alignNote = align
+      ? `<p class="chart-hint" style="margin:0 0 8px;">
+          align: <b>${align.mode}</b>
+          · paired ${align.pairedCount}
+          · lag ${formatNum(align.lagS, 2)} s
+          · unpaired MoCap/IMU ${align.unpairedMocap}/${align.unpairedImu}
+        </p>`
+      : "";
+    return `<div class="compare-side">
     <div class="compare-side__title">
       ${sideBadgeHtml(side)}ขา ${side}
-      <span class="card-badge neutral">MoCap ${block.mocap.cycleCount} · IMU ${block.imu.cycleCount}</span>
+      <span class="card-badge neutral">MoCap ${block.mocapAll?.cycleCount ?? block.mocap.cycleCount} · IMU ${block.imuAll?.cycleCount ?? block.imu.cycleCount}</span>
     </div>
+    ${alignNote}
     <div class="cycles-table-wrap">
       <table class="cycles-table compare-table">
         <thead>

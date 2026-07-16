@@ -395,6 +395,8 @@ export class GaitProcessor {
     this.sessionStartTime = null;
     this.latestSampleTimestampMs = null;
     this.relativeTimestampOriginMs = null;
+    // ไม่ใช้เป็นฐานเวลาอีกแล้ว — เดิมผูก Date.now() ทำให้ cycleStartTimestampMs
+    // ไม่ reproducible ตอน reprocess relative timestamps จาก firmware
     this.absoluteTimestampOriginMs = null;
     this.lastSourceTimestampMs = null;
     this.gyroBiasDps = { gx: 0, gy: 0, gz: 0 };
@@ -807,17 +809,18 @@ export class GaitProcessor {
       return valueMs;
     }
 
+    // Relative timestamp (เช่น ESP32 micros()/1000 นับจากบูต): เก็บเป็น ms นับจาก
+    // จุดเริ่ม session นี้ — ไม่ผูก Date.now() เพื่อให้ reprocess ไฟล์เดิมได้ค่าเดิม
+    // และ align กับ mocap ที่ใช้ (t - t0) ได้
     if (
       this.relativeTimestampOriginMs === null
-      || this.absoluteTimestampOriginMs === null
       || (this.lastSourceTimestampMs !== null && valueMs < this.lastSourceTimestampMs - 1000)
     ) {
       this.relativeTimestampOriginMs = valueMs;
-      this.absoluteTimestampOriginMs = Date.now();
     }
 
     this.lastSourceTimestampMs = valueMs;
-    return this.absoluteTimestampOriginMs + (valueMs - this.relativeTimestampOriginMs);
+    return valueMs - this.relativeTimestampOriginMs;
   }
 
   getSampleIntervalSeconds(timestampMs) {

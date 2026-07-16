@@ -9,16 +9,16 @@ import {
   reprocessImuTrace,
   summarizeMocapSide,
   summarizeImuSide,
+  pairCyclesByTime,
 } from './compareImuTrace.js';
 
-function buildDemoTrace({ numStrides = 8, side = 'R' } = {}) {
+function buildDemoTrace({ numStrides = 8, side = 'R', boardEpochMs = 5000 } = {}) {
   const { samples } = generateWalkingData({ numStrides, strideTime: 1.05 });
   const rec = new TraceRecorder({ sampleRateHzNominal: 100 });
   const proc = new GaitProcessor();
-  const t0 = Date.now();
 
   rec.start();
-  proc.onParams(({ params, newCycleDiagnostics }) => {
+  proc.onParams(({ newCycleDiagnostics }) => {
     if (!newCycleDiagnostics?.length) return;
     for (const d of newCycleDiagnostics) {
       rec.recordCycle({
@@ -31,13 +31,14 @@ function buildDemoTrace({ numStrides = 8, side = 'R' } = {}) {
 
   let n = 0;
   for (const s of samples) {
+    // จำลอง firmware: t_ms = micros()/1000 นับจากบูต (relative ต่ำกว่า epoch)
+    const timestampMs = boardEpochMs + Math.round(s.timestamp * 1000);
     const sample = {
       ...s,
       sensorKey: `demo-${side}`,
       side,
       sensorMount: 'shank',
-      timestampMs: t0 + Math.round(s.timestamp * 1000),
-      // demo ไม่มี sensor-frame — ใส่ canonical เป็นทั้งคู่
+      timestampMs,
       rawAccelSensor: [s.ax, s.ay, s.az],
       rawGyroSensor: [s.gx, s.gy, s.gz],
       raw_accel: [s.ax, s.ay, s.az],
@@ -68,8 +69,8 @@ function buildDemoTrace({ numStrides = 8, side = 'R' } = {}) {
 }
 
 function fakeMocapFromImuCycles(imuCycles, side = 'R') {
-  const cycles = imuCycles.map((c) => ({
-    hsStartTimeS: 0,
+  const cycles = imuCycles.map((c, i) => ({
+    hsStartTimeS: Number.isFinite(c.cycleStartTimeS) ? c.cycleStartTimeS : i * (c.strideTimeS ?? 1.05),
     strideTimeS: c.strideTimeS ?? 1.05,
     strideLengthM: c.strideLengthM,
     cadenceSpm: c.cadenceSpm,
@@ -112,6 +113,17 @@ test('reprocessImuTrace: ได้ cycles จาก demo samples', () => {
   assert.ok(result.bySide.R.length >= 3, `ควรได้หลาย cycle ได้ ${result.bySide.R.length}`);
   assert.ok(result.bySide.R.every((c) => Number.isFinite(c.strideLengthM)));
   assert.ok(result.bySide.R.every((c) => Number.isFinite(c.cadenceSpm)));
+});
+
+test('🟠 reprocess: stancePct ต้อง upgrade จาก null เป็นค่าเมื่อ temporal resolve', () => {
+  const trace = buildDemoTrace({ numStrides: 8, side: 'R' });
+  const result = reprocessImuTrace(trace);
+  assert.equal(result.ok, true);
+  const withStance = result.bySide.R.filter((c) => Number.isFinite(c.stancePct));
+  assert.ok(
+    withStance.length >= Math.floor(result.bySide.R.length * 0.5),
+    `ควรได้ stancePct ส่วนใหญ่ ได้ ${withStance.length}/${result.bySide.R.length}`,
+  );
 });
 
 test('compareMocapToImu: เมื่อ MoCap = IMU (synthetic) error ใกล้ 0', () => {
@@ -174,4 +186,57 @@ test('summarizeImuSide: นับ clamped', () => {
   ]);
   assert.equal(summary.clampedCount, 1);
   assert.equal(summary.cycleCount, 2);
+});
+
+test('🔴 reprocess: cycleStartTimeS reproducible ข้ามรอบ (relative board clock)', () => {
+  const trace = buildDemoTrace({ numStrides: 5, side: 'R', boardEpochMs: 8000 });
+  const a = reprocessImuTrace(trace);
+  const b = reprocessImuTrace(trace);
+  assert.ok(a.bySide.R.length >= 2);
+  assert.deepEqual(
+    a.bySide.R.map((c) => c.cycleStartTimestampMs),
+    b.bySide.R.map((c) => c.cycleStartTimestampMs),
+  );
+  assert.ok(a.bySide.R.every((c) => c.cycleStartTimestampMs < 1e11),
+    'ต้องเป็น session-relative ไม่ใช่ wall-clock epoch');
+});
+
+test('🔴 distanceBySide: ขาที่ไม่มี cycle ต้องเป็น null ไม่ใช่ −100%', () => {
+  const mocap = {
+    perSide: {
+      L: { cycles: [{ hsStartTimeS: 0, strideLengthM: 1, cadenceSpm: 100, walkingSpeedMps: 1, stancePct: 60, peakShankAngleDeg: 20 }] },
+      R: { cycles: [] },
+    },
+    bilateral: { sameSideRepeats: 0 },
+    session: { pelvisNetForwardDisplacementM: 1 },
+  };
+  const imuTrace = {
+    samples: [],
+    cycles: [{ side: 'L', sensorKey: 'x', strideLengthM: 1.0, strideLengthClamped: false, cycleStartTimestampMs: 1000 }],
+    groundTruth: { distanceM: 10 },
+  };
+  const report = compareMocapToImu(mocap, imuTrace);
+  assert.equal(report.session.distanceBySide.R.imuSumStrideLengthM, null);
+  assert.equal(report.session.distanceBySide.R.vsGroundTruthPct, null);
+});
+
+test('🔴 pairCyclesByTime: จับคู่หลังมี lag คงที่ + ตัด unpaired', () => {
+  const mocapCycles = [
+    { hsStartTimeS: 1.0, strideLengthM: 1.2, cadenceSpm: 110, walkingSpeedMps: 1.1, stancePct: 60, peakShankAngleDeg: 30 },
+    { hsStartTimeS: 2.1, strideLengthM: 1.25, cadenceSpm: 108, walkingSpeedMps: 1.15, stancePct: 61, peakShankAngleDeg: 31 },
+    { hsStartTimeS: 3.2, strideLengthM: 1.22, cadenceSpm: 109, walkingSpeedMps: 1.12, stancePct: 60, peakShankAngleDeg: 29 },
+  ];
+  // IMU มีช่วงยืนนิ่งต้นทาง + lag 1.5s
+  const imuCycles = [
+    { cycleStartTimeS: 0.2, strideLengthM: 0.3, cadenceSpm: 50, walkingSpeedMps: 0.2, stancePct: 80, peakShankAngleDeg: 5 },
+    { cycleStartTimeS: 2.5, strideLengthM: 1.21, cadenceSpm: 111, walkingSpeedMps: 1.1, stancePct: 59, peakShankAngleDeg: 30 },
+    { cycleStartTimeS: 3.6, strideLengthM: 1.24, cadenceSpm: 107, walkingSpeedMps: 1.14, stancePct: 62, peakShankAngleDeg: 32 },
+    { cycleStartTimeS: 4.7, strideLengthM: 1.20, cadenceSpm: 110, walkingSpeedMps: 1.11, stancePct: 60, peakShankAngleDeg: 28 },
+    { cycleStartTimeS: 8.0, strideLengthM: 0.4, cadenceSpm: 40, walkingSpeedMps: 0.1, stancePct: 85, peakShankAngleDeg: 4 },
+  ];
+  const aligned = pairCyclesByTime(mocapCycles, imuCycles);
+  assert.ok(aligned.pairs.length >= 2, `ควรจับคู่ได้หลายคู่ ได้ ${aligned.pairs.length}`);
+  assert.ok(Math.abs(aligned.lagS - 1.5) < 0.3, `lag ควรใกล้ 1.5s ได้ ${aligned.lagS}`);
+  // คู่ที่จับได้ไม่ควรรวม idle stride 0.3m ที่ต้น
+  assert.ok(aligned.pairs.every((p) => p.imu.strideLengthM > 0.8));
 });

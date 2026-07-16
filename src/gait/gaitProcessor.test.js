@@ -188,3 +188,34 @@ test('reset() เคลียร์ pendingCycleDiagnostics ที่ยัง�
   proc.reset();
   assert.deepEqual(proc.pendingCycleDiagnostics, []);
 });
+
+test('🔴 resolveTimestampMs: relative board clock → session-relative ที่ reproducible', async () => {
+  // ใช้ samples ชุดเดียวกันข้าม 2 รอบ — ถ้ายังผูก Date.now() ค่าจะต่างกันหลัง sleep
+  const { samples } = generateWalkingData({ numStrides: 4, strideTime: 1.05 });
+
+  function collectStarts() {
+    const proc = new GaitProcessor();
+    const starts = [];
+    const seen = new Set();
+    proc.onParams(({ params }) => {
+      if (!params?.cycleKey || seen.has(params.cycleKey)) return;
+      seen.add(params.cycleKey);
+      starts.push(params.cycleStartTimestampMs);
+    });
+    let n = 0;
+    for (const s of samples) {
+      proc.addSample({ ...s, timestampMs: 5000 + Math.round(s.timestamp * 1000) });
+      n += 1;
+      if (n % 40 === 0) proc.analyze();
+    }
+    proc.analyze();
+    return starts;
+  }
+
+  const a = collectStarts();
+  await new Promise((r) => setTimeout(r, 25));
+  const b = collectStarts();
+  assert.ok(a.length >= 1);
+  assert.deepEqual(a, b);
+  assert.ok(a.every((t) => t < 1e11), `ต้องไม่เป็น wall-clock epoch ได้ ${a[0]}`);
+});
