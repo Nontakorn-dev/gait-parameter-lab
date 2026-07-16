@@ -392,12 +392,16 @@ function renderGroundTruth(data) {
     distanceHtml = `<div class="distance-check">
       ${check.perSensor
         .map((p) => {
-          const cls = distanceCheckClass(p.errorPct);
-          const noDataNote = p.noDataCount > 0
-            ? ` <span class="flag-bad">(${p.noDataCount} cycle ไม่มีข้อมูล — ไม่รวมใน sum, error% อาจไม่แม่น)</span>`
+          const hasGap = p.noDataCount > 0;
+          // sum ที่ขาด cycle ไปทำให้ errorPct เพี้ยนไปทางลบเกินจริงเสมอ (นับน้อยกว่าที่เดินจริง)
+          // สีปกติ (ok/warn/bad) จะดูน่าเชื่อถือเกินจริงทั้งที่ตัวเลขไม่ครบ จึงบังคับเป็นสีเทา + ⚠️ แทน
+          const cls = hasGap ? "unreliable" : distanceCheckClass(p.errorPct);
+          const valuePrefix = hasGap ? "⚠️ " : "";
+          const noDataNote = hasGap
+            ? ` <span class="flag-bad">(${p.noDataCount} cycle ไม่มีข้อมูล — ไม่รวมใน sum, error% นี้ไม่น่าเชื่อถือ)</span>`
             : "";
           return `<div class="distance-check__stat">
-            <div class="distance-check__value ${cls}">${formatSigned(p.errorPct, 1)}%</div>
+            <div class="distance-check__value ${cls}">${valuePrefix}${formatSigned(p.errorPct, 1)}%</div>
             <div class="distance-check__label">${sensorLabel(p.sensorKey, p.side)} · sum ${formatNum(p.sumStrideLengthM, 2)}m / ${p.cycleCount} cycles${noDataNote}</div>
           </div>`;
         })

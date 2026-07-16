@@ -320,6 +320,8 @@ code {
 .distance-check__value.ok { color: var(--green-700); }
 .distance-check__value.warn { color: var(--amber-600); }
 .distance-check__value.bad { color: var(--red-700); }
+/* sum ขาด cycle ไป — เลขไม่น่าเชื่อถือ ไม่ควรใช้สี ok/warn/bad ปกติ (ดูน่าเชื่อถือเกินจริง) */
+.distance-check__value.unreliable { color: var(--text-light); }
 
 /* ---- Cycles / ZUPT table ---- */
 
