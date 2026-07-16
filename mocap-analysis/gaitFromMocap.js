@@ -1,54 +1,34 @@
 // คำนวณ gait parameter จาก marker ตำแหน่ง (ASIS x2, Knee/Lateral Femoral Epicondyle x2,
-// Ankle/Lateral Malleolus x2) — ใช้ GaitEventDetector ตัวเดียวกับที่ pipeline IMU จริงใช้
-// เพื่อให้เทียบผลแบบ apples-to-apples (มุม/ความเร็วเชิงมุมจาก mocap ป้อนเข้า detector
-// เดียวกับที่ป้อนสัญญาณ gyro จริง)
+// Ankle/Lateral Malleolus x2)
+//
+// Event detection (Heel Strike / Toe Off) ใช้ "foot velocity algorithm" — มองพฤติกรรม
+// การเคลื่อนที่ของข้อเท้าโดยตรง (นิ่ง = แตะพื้น, ขยับ = แกว่ง) ไม่ได้ใช้ GaitEventDetector
+// ของ IMU pipeline อีกต่อไป: การใช้ detector ตัวเดียวกันสำหรับทั้งสองแหล่งข้อมูลมีจุดบอดร่วม
+// (shared blind spot) — ถ้า algorithm มี bias เป็นระบบ bias นั้นจะปรากฏเหมือนกันทั้งสองฝั่ง
+// แล้วหักล้างกันหายไปตอนเทียบผล ทำให้ดูเหมือน "ตรงกัน" ทั้งที่ทั้งคู่ผิดไปทางเดียวกัน วิธีนี้
+// (velocityEventDetector.js) จึงเป็น ground truth ที่อิสระจากอัลกอริทึมฝั่ง IMU จริง ๆ
+// (ดู mocap-analysis/velocityEventDetector.js สำหรับรายละเอียด + อ้างอิงวรรณกรรม)
 //
 // ⚠️ ข้อจำกัดที่ตั้งใจไว้ตรง ๆ (ยังไม่มีข้อมูลจริงมาตรวจสอบ):
-//   - threshold ของ GaitEventDetector ด้านล่างเป็นค่าเริ่มต้นที่ "ยังไม่ผ่านการยืนยัน"
-//     กับสัญญาณ shank-angular-velocity ที่ derive จาก mocap จริง (ต่างจาก IMU ตรงที่
-//     mocap ไม่มี noise ทางไฟฟ้า แต่ differentiate เชิงตัวเลขจากตำแหน่งจะขยาย jitter ได้)
-//     ต้องปรับ (options.detector) เมื่อมีข้อมูลจริงและเห็นว่า event detection พลาด/เกิน
-//   - ไม่มี marker ปลายเท้า/heel ในชุดนี้ (ASIS+Knee+Ankle เท่านั้น) จึงไม่มี ground truth
-//     สำหรับ toe-off ที่แม่นเท่าไฟล์ที่มี toe marker, และ "clearance" ที่คำนวณได้เป็นแค่
-//     ระยะยกของ "ข้อเท้า" ไม่ใช่ปลายเท้า — ใกล้เคียงตำแหน่งที่ IMU ติดจริงบนหน้าแข้งส่วนล่าง
-//     พอสมควร แต่ไม่ใช่ค่าเดียวกันเป๊ะกับ clearance ที่ระบบ IMU รายงาน (นั่นวัดจาก double
-//     integration ของ accel บนหน้าแข้ง ไม่ใช่ปลายเท้าเช่นกัน แต่คนละตำแหน่ง/คนละวิธี)
+//   - threshold ของ velocityEventDetector เป็นค่าเริ่มต้นที่ตรวจสอบแล้วว่าเสถียรกับ
+//     synthetic ground truth (คลาดเคลื่อน stance duration < 1.5% ในช่วง 0.02-0.3 m/s)
+//     แต่ยังไม่เคยเห็นข้อมูลจริงซึ่งมี marker noise/jitter มากกว่าข้อมูลสังเคราะห์ไร้ noise
+//   - ไม่มี marker ปลายเท้า/heel ในชุดนี้ (ASIS+Knee+Ankle เท่านั้น) จึงใช้ "ข้อเท้า" เป็นจุด
+//     สังเกตการแตะพื้นแทนส้นเท้า/ปลายเท้าโดยตรง — สมเหตุสมผลเพราะข้อเท้า/malleolus แทบไม่ขยับ
+//     แนวราบตอน stance เหมือนกัน (foot flat, ankle joint เป็นจุดหมุน) แต่ TO ที่ได้อาจหมายถึง
+//     "เท้าเริ่มขยับ" กว้าง ๆ ไม่ใช่ "ปลายเท้าพ้นพื้น" เป๊ะเหมือนมี toe marker จริง
+//   - "clearance" คือระยะยกของ "ข้อเท้า" ไม่ใช่ปลายเท้า — ใกล้เคียงตำแหน่งที่ IMU ติดจริง
+//     บนหน้าแข้งส่วนล่างพอสมควร แต่ไม่ใช่ค่าเดียวกันเป๊ะกับ clearance ที่ระบบ IMU รายงาน
+//     (นั่นวัดจาก double integration ของ accel บนหน้าแข้ง คนละตำแหน่ง/คนละวิธี)
 //   - สมมติว่าเดินเป็นเส้นตรง (ไม่มีเลี้ยว) ตอนหาแกนทิศทางเดินจาก ASIS midpoint
-//   - ⚠️ toe-off / stancePct / swingPct: verify ด้วย synthetic ground truth แล้วพบว่า
-//     "unresolved" บ่อยมาก (ไม่ใช่บั๊ก — เป็นข้อจำกัดจริง) เพราะ findLocalMinima ใน
-//     GaitEventDetector ใช้ minDistance=10 samples ตายตัว (ไม่ scale ตาม sampleRate)
-//     ที่ mocap 120Hz หน้าต่างนี้แทนเวลาสั้นกว่าที่ IMU 100Hz ถูก tune ไว้ ทำให้ prominence
-//     ที่วัดได้ต่ำกว่าเกณฑ์ default (30) แทบทุกครั้ง — ลองลด toProminence แล้วเจอว่า TO
-//     ที่ detect ได้ตกที่ phase~0.50 ของ stride ไม่ใช่ 0.62 ที่เป็น ground truth จริง
-//     (คือคนละจุดกับ toe-off จริง) จึง "ไม่" ลด threshold ให้ เพราะจะได้ค่าที่ดูสมเหตุสมผล
-//     แต่ผิด — 'unresolved' (ไม่รู้) ปลอดภัยกว่าตัวเลขที่มั่นใจแต่ผิด. stride length/
-//     cadence/HS timing/clearance ไม่กระทบเรื่องนี้เลย (verify แยกแล้วแม่นกับ ground truth)
-//     ต้องรอข้อมูลจริงเพื่อ tune toProminence/toSearchPct ให้เจอ TO ถูกจุดจริง
+//
+// shankAngleDeg/angularVelocityDps ยังคำนวณไว้ (peakShankAngleDeg ในผลลัพธ์ + เผื่อใช้ทำ
+// direct signal-correlation เทียบกับมุมจาก IMU+Kalman โดยตรงในอนาคต — เป็นการ validate ที่
+// อิสระกว่าเดิมอีกแบบ เพราะไม่ต้องพึ่ง event detector เลยด้วยซ้ำ) แต่ไม่ได้ใช้หา HS/TO แล้ว
 
-import { GaitEventDetector } from '../src/gait/gaitEventDetector.js';
 import { rad2deg } from '../src/gait/signalUtils.js';
 import { extractMarkerSeries, interpolateGaps } from './parseOptiTrack.js';
-
-// ค่าเริ่มต้นของ GaitEventDetector สำหรับสัญญาณจาก mocap — "ยังไม่ผ่านการยืนยัน"
-// (ดู comment หัวไฟล์) ปรับผ่าน options.detector ได้
-const DEFAULT_MOCAP_DETECTOR_OPTIONS = {
-  hsProminence: 45,
-  toProminence: 30, // มักหา TO ไม่เจอ ("unresolved") ที่ 120Hz — ดู caveat หัวไฟล์ ห้ามลดมั่ว ๆ
-  hsVelocityThreshold: -50,
-  hsVelocityThresholdFloorAbs: 12,
-  minStrideTime: 0.6,
-  maxStrideTime: 3.0,
-  minHsSeparationSeconds: 0.55,
-  toSearchStartPct: 0.20,
-  toSearchEndPct: 0.80,
-  hsEnvelopeScale: 0.28,
-  hsPreviousPeakScale: 0.28,
-  hsPreviousHsScale: 0.60,
-  hsAdaptiveHistorySize: 3,
-  hsEnvelopeWindowSeconds: 0.8,
-  minSwingAngularVelocityAbs: 12,
-  usePreviousValidStanceFallback: true,
-};
+import { computeForwardPosition, computeVelocity, detectStanceIntervals, buildCyclesFromStanceIntervals } from './velocityEventDetector.js';
 
 function dot2(ax, az, bx, bz) {
   return ax * bx + az * bz;
@@ -101,6 +81,7 @@ export function computeShankAngleDeg(kneeSeries, ankleSeries, forwardAxis) {
 }
 
 // อนุพันธ์เชิงตัวเลข (central difference) เป็น deg/s จาก dt จริงต่อคู่เฟรม (ทนต่อ dt ไม่คงที่)
+// เก็บไว้สำหรับ direct signal-correlation เทียบกับ IMU ในอนาคต (ไม่ได้ใช้หา HS/TO แล้ว)
 export function computeAngularVelocityDps(t, angleDeg) {
   const n = angleDeg.length;
   const w = new Array(n).fill(null);
@@ -110,7 +91,6 @@ export function computeAngularVelocityDps(t, angleDeg) {
     if (dt <= 0) continue;
     w[i] = (angleDeg[i + 1] - angleDeg[i - 1]) / dt;
   }
-  // ปลายทั้งสองใช้ forward/backward difference (มีผลแค่ 1 sample แรก/ท้ายของทั้งเซสชัน)
   if (n >= 2 && angleDeg[0] !== null && angleDeg[1] !== null) {
     const dt = t[1] - t[0];
     if (dt > 0) w[0] = (angleDeg[1] - angleDeg[0]) / dt;
@@ -142,56 +122,42 @@ function computeSideGait(parsed, kneeId, ankleId, forwardAxis, detectorOptions) 
 
   const t0 = parsed.frames[0].time;
   const t = parsed.frames.map((f) => f.time - t0);
+
+  // มุมหน้าแข้ง — ใช้แค่รายงาน peakShankAngleDeg ไม่ได้ใช้หา event อีกต่อไป
   const angleDeg = computeShankAngleDeg(knee, ankle, forwardAxis);
-  const angularVelocityDps = computeAngularVelocityDps(t, angleDeg);
 
-  if (angleDeg.some((v) => v === null) || angularVelocityDps.some((v) => v === null)) {
-    throw new Error('มุมหน้าแข้งหรือความเร็วเชิงมุมคำนวณไม่ได้ครบทุกเฟรม (marker หายที่ปลายช่วงข้อมูล?)');
-  }
-
-  const detector = new GaitEventDetector({
-    ...DEFAULT_MOCAP_DETECTOR_OPTIONS,
-    ...detectorOptions,
-    sampleRate: parsed.frameRateHz,
-  });
-  const { events, cycles: rawCycles } = detector.detect(angularVelocityDps, t);
+  // Heel-Strike/Toe-Off จากความเร็วแนวเดินของข้อเท้าโดยตรง — อิสระจาก IMU detector 100%
+  const forwardPosition = computeForwardPosition(ankle, forwardAxis);
+  const forwardVelocity = computeVelocity(t, forwardPosition);
+  const stanceIntervals = detectStanceIntervals(t, forwardVelocity, detectorOptions);
+  const rawCycles = buildCyclesFromStanceIntervals(t, forwardPosition, stanceIntervals, detectorOptions);
 
   const cycles = rawCycles.map((cycle) => {
-    const startIdx = cycle.hsStart.index;
-    const endIdx = cycle.hsEnd.index;
-
     let peakAngleDeg = -Infinity;
     let minY = Infinity;
     let maxY = -Infinity;
-    for (let i = startIdx; i <= endIdx; i += 1) {
-      peakAngleDeg = Math.max(peakAngleDeg, angleDeg[i]);
+    for (let i = cycle.hsStartIdx; i <= cycle.hsEndIdx; i += 1) {
+      if (Number.isFinite(angleDeg[i])) peakAngleDeg = Math.max(peakAngleDeg, angleDeg[i]);
       minY = Math.min(minY, ankle.y[i]);
       maxY = Math.max(maxY, ankle.y[i]);
     }
 
-    const strideVecX = ankle.x[endIdx] - ankle.x[startIdx];
-    const strideVecZ = ankle.z[endIdx] - ankle.z[startIdx];
-    const strideLengthM = Math.abs(dot2(strideVecX, strideVecZ, forwardAxis.fx, forwardAxis.fz));
-    const strideLengthM2d = Math.sqrt(strideVecX * strideVecX + strideVecZ * strideVecZ);
-
-    const strideTimeS = cycle.strideTime;
-    const cadenceSpm = strideTimeS > 0 ? (2 / strideTimeS) * 60 : null;
-    const walkingSpeedMps = strideTimeS > 0 ? strideLengthM / strideTimeS : null;
+    const walkingSpeedMps = cycle.strideTimeS > 0 ? cycle.strideLengthM / cycle.strideTimeS : null;
+    const cadenceSpm = cycle.strideTimeS > 0 ? (2 / cycle.strideTimeS) * 60 : null;
 
     return {
-      hsStartTimeS: cycle.hsStart.time,
-      hsEndTimeS: cycle.hsEnd.time,
-      strideTimeS,
-      stanceTimeS: cycle.stanceTime,
-      swingTimeS: cycle.swingTime,
+      hsStartTimeS: cycle.hsStartTimeS,
+      hsEndTimeS: cycle.hsEndTimeS,
+      toTimeS: cycle.toTimeS,
+      strideTimeS: cycle.strideTimeS,
+      stanceTimeS: cycle.stanceTimeS,
+      swingTimeS: cycle.swingTimeS,
       stancePct: cycle.stancePct,
       swingPct: cycle.swingPct,
-      temporalSource: cycle.temporalSource,
-      strideLengthM,
-      strideLengthM2d,
+      strideLengthM: cycle.strideLengthM,
       cadenceSpm,
       walkingSpeedMps,
-      peakShankAngleDeg: peakAngleDeg,
+      peakShankAngleDeg: Number.isFinite(peakAngleDeg) ? peakAngleDeg : null,
       // proxy: ระยะยกข้อเท้า ไม่ใช่ปลายเท้า/จุดติด IMU เป๊ะ ๆ — ดู caveat หัวไฟล์
       ankleClearanceM: Math.max(0, maxY - minY),
     };
@@ -203,7 +169,6 @@ function computeSideGait(parsed, kneeId, ankleId, forwardAxis, detectorOptions) 
 
   return {
     cycles,
-    events,
     summary: {
       cycleCount: cycles.length,
       meanStrideLengthM: mean(strideLengths),
@@ -219,7 +184,6 @@ export function computeGaitFromMocap(parsed, markerRoles, options = {}) {
 
   const pelvisX = asisL.x.map((v, i) => (v === null || asisR.x[i] === null ? null : (v + asisR.x[i]) / 2));
   const pelvisZ = asisL.z.map((v, i) => (v === null || asisR.z[i] === null ? null : (v + asisR.z[i]) / 2));
-  const pelvisY = asisL.y.map((v, i) => (v === null || asisR.y[i] === null ? null : (v + asisR.y[i]) / 2));
   const forwardAxis = computeForwardAxis(pelvisX, pelvisZ);
 
   const left = computeSideGait(parsed, L_Knee, L_Ankle, forwardAxis, options.detector);

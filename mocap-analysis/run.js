@@ -31,10 +31,9 @@ function formatCycleRow(c) {
     c.strideLengthM.toFixed(3).padStart(9),
     Number.isFinite(c.cadenceSpm) ? c.cadenceSpm.toFixed(1).padStart(7) : '—'.padStart(7),
     Number.isFinite(c.walkingSpeedMps) ? c.walkingSpeedMps.toFixed(3).padStart(7) : '—'.padStart(7),
-    c.peakShankAngleDeg.toFixed(1).padStart(7),
+    Number.isFinite(c.peakShankAngleDeg) ? c.peakShankAngleDeg.toFixed(1).padStart(7) : '—'.padStart(7),
     c.ankleClearanceM.toFixed(3).padStart(8),
     Number.isFinite(c.stancePct) ? c.stancePct.toFixed(1).padStart(6) : '—'.padStart(6),
-    c.temporalSource.padStart(20),
   ].join(' | ');
 }
 
@@ -45,7 +44,7 @@ function printSideReport(side, data) {
     return;
   }
   console.log(
-    '  hsStart(s) | strideT(s) | stride(m) | cadence | speed(m/s) | peakAngle | clearance(m) | stance% | source',
+    '  hsStart(s) | strideT(s) | stride(m) | cadence | speed(m/s) | peakAngle | clearance(m) | stance%',
   );
   for (const c of data.cycles) console.log('  ' + formatCycleRow(c));
   console.log(
