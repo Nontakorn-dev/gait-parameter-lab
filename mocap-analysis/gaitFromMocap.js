@@ -14,6 +14,7 @@
 //   - สมมติเดินเป็นเส้นตรงตอนหา forward axis จาก ASIS midpoint
 
 import { rad2deg } from '../src/gait/signalUtils.js';
+import { minFinite, maxFinite } from '../src/util/finiteStats.js';
 import { extractMarkerSeries, interpolateGaps } from './parseOptiTrack.js';
 import {
   computeForwardPosition,
@@ -33,9 +34,10 @@ function meanFinite(values) {
 }
 
 function rangeFinite(values) {
-  const finite = values.filter(Number.isFinite);
-  if (!finite.length) return null;
-  return Math.max(...finite) - Math.min(...finite);
+  const lo = minFinite(values);
+  const hi = maxFinite(values);
+  if (!Number.isFinite(lo) || !Number.isFinite(hi)) return null;
+  return hi - lo;
 }
 
 /**

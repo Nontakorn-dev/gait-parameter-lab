@@ -1,3 +1,5 @@
+import { minFinite } from '../src/util/finiteStats.js';
+
 // Pure, DOM-free helpers สำหรับ validate/app.js — แยกไว้ต่างหากเพื่อ unit test ได้ตรง ๆ
 // (ไม่มีการอ้าง document/window เลยในไฟล์นี้)
 
@@ -48,15 +50,7 @@ export function computeCyclesBySensor(cycles) {
   return map;
 }
 
-// min ที่ไม่ใช้ spread — Math.min(...bigArray) ทำ stack overflow ที่ราว ~1-1.2 แสน element
-// (ยืนยันแล้วว่า RangeError ที่ 150k) ในขณะที่ trace cap คือ maxSamples=300000 จริง ๆ ได้
-function minFinite(values) {
-  let min = Infinity;
-  for (const v of values) {
-    if (v < min) min = v;
-  }
-  return Number.isFinite(min) ? min : null;
-}
+// minFinite ย้ายไป src/util/finiteStats.js — อย่าใช้ Math.min(...bigArray) (stack overflow ที่ ~150k)
 
 export function summarizeCycles(cycles, thresholds = {}) {
   const list = cycles || [];

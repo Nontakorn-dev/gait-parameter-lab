@@ -10,6 +10,7 @@
 
 import { GaitProcessor } from '../src/gait/gaitProcessor.js';
 import { applyAxisMap } from '../src/gateway/realtimeSensorUtils.js';
+import { minFinite, maxFinite } from '../src/util/finiteStats.js';
 
 const COMPARE_KEYS = [
   { key: 'strideLengthM', unit: 'm' },
@@ -20,7 +21,12 @@ const COMPARE_KEYS = [
 ];
 
 const DEFAULT_MATCH_TOLERANCE_S = 0.40;
-const DEFAULT_MAX_LAG_S = 8;
+// จำกัด < ครึ่ง stride (~0.5s) — สัญญาณเกือบคาบมี peak ที่ n×stride; search ±8s → alias แน่นอน
+const DEFAULT_MAX_LAG_S = 0.4;
+// mocap 120Hz + IMU 100Hz → common grid 200Hz ไม่ทิ้งความละเอียดฝั่งไหน
+const DEFAULT_XCORR_DT_S = 0.005;
+const DEFAULT_MIN_PEAK_CORR = 0.5;
+const AMBIGUOUS_PEAK_RATIO = 0.95;
 
 function mean(values) {
   const finite = values.filter(Number.isFinite);
@@ -210,7 +216,7 @@ export function extractImuCyclesFromTrace(trace) {
   const allStarts = (trace.cycles || [])
     .map((c) => c.cycleStartTimestampMs)
     .filter(Number.isFinite);
-  const t0 = allStarts.length ? Math.min(...allStarts) : null;
+  const t0 = allStarts.length ? minFinite(allStarts) : null;
 
   for (const c of trace.cycles || []) {
     const side = c.side === 'L' || c.side === 'R' ? c.side : null;
@@ -373,36 +379,45 @@ export function resampleUniform(t, y, dt, t0, t1) {
  * ประมาณ lag (IMU − MoCap) จาก normalized cross-correlation ของสัญญาณ
  * อิสระจาก event detector → residual HS หลัง align นี้วัด detector timing bias ได้
  *
- * @returns {{ lagS, peakCorr, polarity, ok }}
+ * - ไม่ค้น polarity (±1): polarity ถูกกำหนดจาก axis map / นิยามมุมแล้ว
+ *   ถ้า corr ติดลบ = สัญญาณว่ามีอะไรผิด (ไม่เงียบ flip)
+ * - maxLag ต้อง < ครึ่ง stride เพื่อเลี่ยง period aliasing
+ * - parabolic interpolation รอบ discrete peak → ~1ms โดยไม่ต้องลด dt ต่อ
+ *
+ * @returns {{ lagS, peakCorr, polarity, ok, ambiguous, rivalPeaks, reason }}
  */
 export function estimateSignalLagS(mocapT, mocapY, imuT, imuY, options = {}) {
   const maxLagS = options.maxLagS ?? DEFAULT_MAX_LAG_S;
-  const dt = options.dtS ?? 0.02; // 50 Hz
+  const dt = options.dtS ?? DEFAULT_XCORR_DT_S;
+  const minPeakCorr = options.minPeakCorr ?? DEFAULT_MIN_PEAK_CORR;
   if (!mocapT?.length || !imuT?.length || mocapT.length !== mocapY.length || imuT.length !== imuY.length) {
-    return { lagS: null, peakCorr: null, polarity: 1, ok: false, reason: 'missing-series' };
+    return { lagS: null, peakCorr: null, polarity: 1, ok: false, ambiguous: false, rivalPeaks: [], reason: 'missing-series' };
   }
 
-  const t0 = Math.max(
-    Math.min(...mocapT.filter(Number.isFinite)),
-    Math.min(...imuT.filter(Number.isFinite)),
-  );
-  const t1 = Math.min(
-    Math.max(...mocapT.filter(Number.isFinite)),
-    Math.max(...imuT.filter(Number.isFinite)),
-  );
+  const mocapT0 = minFinite(mocapT);
+  const imuT0 = minFinite(imuT);
+  const mocapT1 = maxFinite(mocapT);
+  const imuT1 = maxFinite(imuT);
+  if (![mocapT0, imuT0, mocapT1, imuT1].every(Number.isFinite)) {
+    return { lagS: null, peakCorr: null, polarity: 1, ok: false, ambiguous: false, rivalPeaks: [], reason: 'missing-series' };
+  }
+
+  const t0 = Math.max(mocapT0, imuT0);
+  const t1 = Math.min(mocapT1, imuT1);
   if (!(t1 - t0 >= 1.0)) {
-    return { lagS: null, peakCorr: null, polarity: 1, ok: false, reason: 'overlap-too-short' };
+    return { lagS: null, peakCorr: null, polarity: 1, ok: false, ambiguous: false, rivalPeaks: [], reason: 'overlap-too-short' };
   }
 
   const ref = resampleUniform(mocapT, mocapY, dt, t0, t1);
   const sig = resampleUniform(imuT, imuY, dt, t0, t1);
   const maxLagSamples = Math.min(Math.floor(maxLagS / dt), Math.floor(ref.length / 3));
   if (maxLagSamples < 1 || ref.length < 20) {
-    return { lagS: null, peakCorr: null, polarity: 1, ok: false, reason: 'too-few-samples' };
+    return { lagS: null, peakCorr: null, polarity: 1, ok: false, ambiguous: false, rivalPeaks: [], reason: 'too-few-samples' };
   }
 
-  function nccAtLag(polarity, lagSamples) {
-    // corr(ref[i], polarity * sig[i + lagSamples]) — lagSamples>0 = IMU ช้ากว่า (เหตุการณ์มาทีหลัง)
+  function nccAtLag(lagSamples) {
+    // corr(ref[i], sig[i + lagSamples]) — lagSamples>0 = IMU ช้ากว่า (เหตุการณ์มาทีหลัง)
+    // polarity คงที่ = +1 (ไม่ค้น ±1 — กัน half-period ambiguity ของสัญญาณคาบ)
     let sumR = 0;
     let sumS = 0;
     let sumRR = 0;
@@ -415,12 +430,11 @@ export function estimateSignalLagS(mocapT, mocapY, imuT, imuY, options = {}) {
       const r = ref[i];
       const s = sig[j];
       if (!Number.isFinite(r) || !Number.isFinite(s)) continue;
-      const sp = polarity * s;
       sumR += r;
-      sumS += sp;
+      sumS += s;
       sumRR += r * r;
-      sumSS += sp * sp;
-      sumRS += r * sp;
+      sumSS += s * s;
+      sumRS += r * s;
       n += 1;
     }
     if (n < 20) return null;
@@ -430,34 +444,94 @@ export function estimateSignalLagS(mocapT, mocapY, imuT, imuY, options = {}) {
     return num / den;
   }
 
-  let best = { lagSamples: 0, corr: -Infinity, polarity: 1 };
-  for (const polarity of [1, -1]) {
-    for (let lagSamples = -maxLagSamples; lagSamples <= maxLagSamples; lagSamples += 1) {
-      const corr = nccAtLag(polarity, lagSamples);
-      if (corr == null) continue;
-      if (corr > best.corr) {
-        best = { lagSamples, corr, polarity };
-      }
+  const corrByLag = new Map();
+  let bestLagSamples = 0;
+  let bestCorr = -Infinity;
+  for (let lagSamples = -maxLagSamples; lagSamples <= maxLagSamples; lagSamples += 1) {
+    const corr = nccAtLag(lagSamples);
+    if (corr == null) continue;
+    corrByLag.set(lagSamples, corr);
+    if (corr > bestCorr) {
+      bestCorr = corr;
+      bestLagSamples = lagSamples;
     }
   }
 
-  if (!(best.corr > 0.15)) {
+  if (!(bestCorr > -Infinity)) {
+    return { lagS: null, peakCorr: null, polarity: 1, ok: false, ambiguous: false, rivalPeaks: [], reason: 'weak-correlation' };
+  }
+
+  let mostNegativeCorr = Infinity;
+  for (const corr of corrByLag.values()) {
+    if (corr < mostNegativeCorr) mostNegativeCorr = corr;
+  }
+
+  // polarity คงที่ = +1: ถ้า anti-correlation ชัด (แม้ sidelobe บวกอ่อน ๆ ในช่วง search)
+  // รายงาน inverted — ไม่เงียบ flip และไม่กลืนเป็น weak-correlation
+  const inverted = bestCorr < 0
+    || (bestCorr < minPeakCorr && mostNegativeCorr <= -minPeakCorr);
+  if (inverted) {
     return {
       lagS: null,
-      peakCorr: best.corr === -Infinity ? null : best.corr,
-      polarity: best.polarity,
+      peakCorr: mostNegativeCorr < bestCorr ? mostNegativeCorr : bestCorr,
+      polarity: 1,
       ok: false,
+      ambiguous: false,
+      rivalPeaks: [],
+      reason: 'inverted-polarity',
+    };
+  }
+
+  if (!(bestCorr >= minPeakCorr)) {
+    return {
+      lagS: null,
+      peakCorr: bestCorr,
+      polarity: 1,
+      ok: false,
+      ambiguous: false,
+      rivalPeaks: [],
       reason: 'weak-correlation',
     };
   }
 
+  // rival peaks = local maxima ที่ corr ≥ 95% ของ peak หลัก (ไม่นับตัวอย่างบนไหล่ peak เดียวกัน)
+  const rivalPeaks = [];
+  for (const [lagSamples, corr] of corrByLag) {
+    if (lagSamples === bestLagSamples) continue;
+    if (corr < bestCorr * AMBIGUOUS_PEAK_RATIO) continue;
+    const left = corrByLag.get(lagSamples - 1);
+    const right = corrByLag.get(lagSamples + 1);
+    const isLocalMax = (left == null || corr >= left) && (right == null || corr >= right);
+    if (!isLocalMax) continue;
+    rivalPeaks.push({ lagS: lagSamples * dt, corr });
+  }
+  const ambiguous = rivalPeaks.length > 0;
+
+  // parabolic interpolation รอบ discrete peak → sub-sample lag
+  const ym1 = corrByLag.get(bestLagSamples - 1);
+  const y0 = bestCorr;
+  const yp1 = corrByLag.get(bestLagSamples + 1);
+  let frac = 0;
+  if (Number.isFinite(ym1) && Number.isFinite(yp1)) {
+    const denom = ym1 - 2 * y0 + yp1;
+    if (Math.abs(denom) > 1e-12) {
+      frac = clampFrac(0.5 * (ym1 - yp1) / denom, -0.75, 0.75);
+    }
+  }
+
   return {
-    lagS: best.lagSamples * dt,
-    peakCorr: best.corr,
-    polarity: best.polarity,
-    ok: true,
-    reason: null,
+    lagS: (bestLagSamples + frac) * dt,
+    peakCorr: bestCorr,
+    polarity: 1,
+    ok: !ambiguous,
+    ambiguous,
+    rivalPeaks,
+    reason: ambiguous ? 'ambiguous-period-peaks' : null,
   };
+}
+
+function clampFrac(value, min, max) {
+  return Math.max(min, Math.min(max, value));
 }
 
 /** ดึง gx (canonical) ของข้างหนึ่งจาก IMU trace เป็น series เวลา session-relative */
@@ -684,8 +758,13 @@ export function compareMocapToImu(mocap, imuTrace, options = {}) {
         alignOpts.lagS = signalLag.lagS;
         alignOpts.lagSource = 'signal-xcorr';
       } else {
+        const detail = signalLag.reason === 'inverted-polarity'
+          ? 'corr ติดลบ — ตรวจ axis map / นิยามมุม (ไม่เงียบ flip polarity)'
+          : signalLag.reason === 'ambiguous-period-peaks'
+            ? `peak ใกล้เคียงกันหลายจุด (rival ${signalLag.rivalPeaks?.slice(0, 3).map((p) => `${p.lagS.toFixed(3)}s`).join(', ')})`
+            : signalLag.reason;
         warnings.push(
-          `ขา ${side}: signal xcorr ใช้ไม่ได้ (${signalLag.reason}) — fallback เป็น HS-event lag `
+          `ขา ${side}: signal xcorr ใช้ไม่ได้ (${detail}) — fallback เป็น HS-event lag `
           + '(residual timing ไม่ใช่เมตริก detector bias)',
         );
       }

@@ -228,20 +228,18 @@ test('🔴 pairCyclesByTime: จับคู่หลังมี lag คงท�
     { hsStartTimeS: 2.1, strideLengthM: 1.25, cadenceSpm: 108, walkingSpeedMps: 1.15, stancePct: 61, peakShankAngleDeg: 31 },
     { hsStartTimeS: 3.2, strideLengthM: 1.22, cadenceSpm: 109, walkingSpeedMps: 1.12, stancePct: 60, peakShankAngleDeg: 29 },
   ];
-  // IMU มีช่วงยืนนิ่งต้นทาง + lag 1.5s
+  // IMU มี idle ต้น/ท้าย + sync lag 0.35s (ภายใน DEFAULT_MAX_LAG_S=0.4 — กัน period alias)
   const imuCycles = [
     { cycleStartTimeS: 0.2, strideLengthM: 0.3, cadenceSpm: 50, walkingSpeedMps: 0.2, stancePct: 80, peakShankAngleDeg: 5 },
-    { cycleStartTimeS: 2.5, strideLengthM: 1.21, cadenceSpm: 111, walkingSpeedMps: 1.1, stancePct: 59, peakShankAngleDeg: 30 },
-    { cycleStartTimeS: 3.6, strideLengthM: 1.24, cadenceSpm: 107, walkingSpeedMps: 1.14, stancePct: 62, peakShankAngleDeg: 32 },
-    { cycleStartTimeS: 4.7, strideLengthM: 1.20, cadenceSpm: 110, walkingSpeedMps: 1.11, stancePct: 60, peakShankAngleDeg: 28 },
+    { cycleStartTimeS: 1.35, strideLengthM: 1.21, cadenceSpm: 111, walkingSpeedMps: 1.1, stancePct: 59, peakShankAngleDeg: 30 },
+    { cycleStartTimeS: 2.45, strideLengthM: 1.24, cadenceSpm: 107, walkingSpeedMps: 1.14, stancePct: 62, peakShankAngleDeg: 32 },
+    { cycleStartTimeS: 3.55, strideLengthM: 1.20, cadenceSpm: 110, walkingSpeedMps: 1.11, stancePct: 60, peakShankAngleDeg: 28 },
     { cycleStartTimeS: 8.0, strideLengthM: 0.4, cadenceSpm: 40, walkingSpeedMps: 0.1, stancePct: 85, peakShankAngleDeg: 4 },
   ];
   const aligned = pairCyclesByTime(mocapCycles, imuCycles);
   assert.ok(aligned.pairs.length >= 2, `ควรจับคู่ได้หลายคู่ ได้ ${aligned.pairs.length}`);
-  assert.ok(Math.abs(aligned.lagS - 1.5) < 0.3, `lag ควรใกล้ 1.5s ได้ ${aligned.lagS}`);
-  // คู่ที่จับได้ไม่ควรรวม idle stride 0.3m ที่ต้น
+  assert.ok(Math.abs(aligned.lagS - 0.35) < 0.08, `lag ควรใกล้ 0.35s ได้ ${aligned.lagS}`);
   assert.ok(aligned.pairs.every((p) => p.imu.strideLengthM > 0.8));
-  // HS-event lag → timing metric ใช้ไม่ได้ (shared blind spot)
   assert.equal(aligned.timingMetricValid, false);
   assert.equal(aligned.meanTimeErrorS, null);
 });
@@ -255,20 +253,29 @@ test('🔴 estimateHsTimeLagS: ไม่ให้ 0 ชนะ tie เมื่�
 });
 
 test('🔴 estimateSignalLagS: หา lag จากสัญญาณ + residual HS สะท้อน detector bias', () => {
-  const dt = 0.02;
-  const n = 500;
+  const dt = 0.005;
+  const n = 2000; // 10s
   const mocapT = Array.from({ length: n }, (_, i) => i * dt);
-  const mocapY = mocapT.map((t) => Math.sin(2 * Math.PI * 1.1 * t));
-  const trueLagS = 0.36;
-  const imuT = mocapT.map((t) => t);
-  // IMU = mocap เลื่อนไปทางขวา (ช้ากว่า) trueLagS
-  const imuY = imuT.map((t) => Math.sin(2 * Math.PI * 1.1 * (t - trueLagS)));
+  // asymmetric gait-like: sharp negative dip + broad positive hump
+  const mocapY = mocapT.map((t) => {
+    const phase = (t % 1.0);
+    if (phase < 0.08) return -180 * Math.sin(Math.PI * phase / 0.08);
+    if (phase < 0.55) return 0;
+    return 320 * Math.sin(Math.PI * (phase - 0.55) / 0.45);
+  });
+  const trueLagS = 0.027;
+  const imuY = mocapT.map((t) => {
+    const u = t - trueLagS;
+    const phase = ((u % 1.0) + 1.0) % 1.0;
+    if (phase < 0.08) return -180 * Math.sin(Math.PI * phase / 0.08);
+    if (phase < 0.55) return 0;
+    return 320 * Math.sin(Math.PI * (phase - 0.55) / 0.45);
+  });
 
-  const signal = estimateSignalLagS(mocapT, mocapY, imuT, imuY, { maxLagS: 2, dtS: dt });
-  assert.equal(signal.ok, true);
-  assert.ok(Math.abs(signal.lagS - trueLagS) <= dt + 1e-9, `xcorr lag=${signal.lagS}`);
+  const signal = estimateSignalLagS(mocapT, mocapY, mocapT, imuY);
+  assert.equal(signal.ok, true, signal.reason);
+  assert.ok(Math.abs(signal.lagS - trueLagS) < 0.005, `xcorr lag=${signal.lagS} (want ~${trueLagS})`);
 
-  // HS events: mocap ตรงกับสัญญาณ, IMU detector มี bias +0.10s เพิ่มจาก sync
   const detectorBiasS = 0.10;
   const mocapCycles = [1, 2, 3, 4].map((k) => ({ hsStartTimeS: k }));
   const imuCycles = [1, 2, 3, 4].map((k) => ({
@@ -282,4 +289,64 @@ test('🔴 estimateSignalLagS: หา lag จากสัญญาณ + residual
   assert.equal(paired.timingMetricValid, true);
   assert.ok(Math.abs(paired.meanTimeErrorS - detectorBiasS) < 0.05,
     `หลัง signal-align residual ควร ≈ detector bias ได้ ${paired.meanTimeErrorS}`);
+});
+
+test('🔴 estimateSignalLagS: maxLag กว้างเกินไป → period alias; default 0.4 ถูกต้อง', () => {
+  const dt = 0.005;
+  const n = 3000;
+  const mocapT = Array.from({ length: n }, (_, i) => i * dt);
+  const strideS = 1.0;
+  const shape = (t) => {
+    const phase = ((t % strideS) + strideS) % strideS;
+    if (phase < 0.08) return -180 * Math.sin(Math.PI * phase / 0.08);
+    if (phase < 0.55) return 0;
+    return 320 * Math.sin(Math.PI * (phase - 0.55) / 0.45);
+  };
+  const mocapY = mocapT.map(shape);
+  const trueLagS = 0.027;
+  const imuY = mocapT.map((t) => shape(t - trueLagS));
+
+  const bad = estimateSignalLagS(mocapT, mocapY, mocapT, imuY, { maxLagS: 8, dtS: dt });
+  // ด้วย maxLag=8 มัก ambiguous หรือเลือกผิด period — อย่างน้อยต้องไม่เงียบเชื่อ lag ~2s
+  if (bad.ok) {
+    assert.ok(Math.abs(bad.lagS - trueLagS) < 0.05 || bad.ambiguous,
+      `maxLag=8 ไม่ควรเชื่อ lag ผิดเงียบ ๆ ได้ ${bad.lagS}`);
+  }
+
+  const good = estimateSignalLagS(mocapT, mocapY, mocapT, imuY, { maxLagS: 0.4, dtS: dt });
+  assert.equal(good.ok, true, good.reason);
+  assert.ok(Math.abs(good.lagS - trueLagS) < 0.005, `default-range lag=${good.lagS}`);
+});
+
+test('🔴 estimateSignalLagS: polarity คงที่ — สัญญาณกลับเครื่องหมาย → inverted-polarity', () => {
+  const dt = 0.005;
+  const n = 2000;
+  const t = Array.from({ length: n }, (_, i) => i * dt);
+  // asymmetric: กลับเครื่องหมายแล้วไม่มี peak บวกใกล้ half-period ภายใน ±0.4s
+  const shape = (x) => {
+    const phase = ((x % 1.0) + 1.0) % 1.0;
+    if (phase < 0.08) return -180 * Math.sin(Math.PI * phase / 0.08);
+    if (phase < 0.55) return 0;
+    return 320 * Math.sin(Math.PI * (phase - 0.55) / 0.45);
+  };
+  const y = t.map(shape);
+  const inverted = estimateSignalLagS(t, y, t, y.map((v) => -v), { maxLagS: 0.4, dtS: dt });
+  assert.equal(inverted.ok, false);
+  assert.equal(inverted.reason, 'inverted-polarity');
+  assert.ok(inverted.peakCorr < 0);
+});
+
+test('🔴 estimateSignalLagS: ไม่ Math.min-spread crash กับ series ยาว 150k', () => {
+  const n = 150_000;
+  const t = new Float64Array(n);
+  const y = new Float64Array(n);
+  for (let i = 0; i < n; i += 1) {
+    t[i] = i * 0.01;
+    y[i] = Math.sin(i * 0.01);
+  }
+  // overlap สั้น artificially ด้วย options — แค่ให้ถึง min/max path ก่อน resample
+  // (resample 150k@200Hz ทั้งช่วงจะช้าเกิน; ทดสอบว่าไม่ throw จาก spread)
+  assert.doesNotThrow(() => {
+    estimateSignalLagS(t, y, t, y, { maxLagS: 0.4, dtS: 0.02 });
+  });
 });
