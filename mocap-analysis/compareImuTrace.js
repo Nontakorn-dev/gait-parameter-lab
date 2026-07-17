@@ -306,60 +306,129 @@ function countHsMatches(mocapTimes, imuTimes, lag, matchToleranceS) {
  * ⚠️ ไม่ใช้ residual หลัง align นี้เป็นเมตริก "HS timing bias" — bias ของ detector
  * ถูกดูดเข้า lagS ได้ (shared blind spot). วัด timing จริงต้อง align ระดับสัญญาณก่อน
  *
+ * Coarse→fine (เหมือน signal xcorr):
+ *   1) สแกน candidate กว้าง (±rivalScanMaxLagS) — จำกัดแค่ ±0.4s = การันตี alias เงียบ
+ *   2) เลือกใกล้ coarseLagS ใน fine window เป็นพิเศษ
+ *   3) ถ้ามี rival match นับใกล้เคียงที่ห่างเกิน fine → periodAliasRisk; ห้าม ok โดยไม่มี trusted coarse
+ *
  * Tie-break: ถ้า match count เท่ากัน เลือก lag ที่ residual รวมเล็กสุด (ไม่ seed 0)
  */
 export function estimateHsTimeLagS(mocapCycles, imuCycles, options = {}) {
-  const maxLagS = options.maxLagS ?? DEFAULT_MAX_LAG_S;
+  const fineMaxLagS = options.fineMaxLagS ?? options.maxLagS ?? DEFAULT_FINE_MAX_LAG_S;
+  const rivalScanMaxLagS = options.rivalScanMaxLagS ?? DEFAULT_RIVAL_SCAN_MAX_LAG_S;
   const matchToleranceS = options.matchToleranceS ?? DEFAULT_MATCH_TOLERANCE_S;
+  const hasExplicitCoarse = Number.isFinite(options.coarseLagS);
+  const coarseLagS = hasExplicitCoarse ? options.coarseLagS : 0;
+  const trustedCoarse = hasExplicitCoarse;
+
+  const empty = {
+    lagS: 0,
+    matchCount: 0,
+    tiedLags: [],
+    ambiguous: false,
+    periodAliasRisk: false,
+    rivalLags: [],
+    coarseLagS,
+    ok: false,
+    reason: 'missing-cycles',
+    residualAbsSum: null,
+  };
+
   const mocapTimes = mocapCycles.map(mocapCycleTimeS).filter(Number.isFinite).sort((a, b) => a - b);
   const imuTimes = imuCycles.map(imuCycleTimeS).filter(Number.isFinite).sort((a, b) => a - b);
   if (!mocapTimes.length || !imuTimes.length) {
-    return { lagS: 0, matchCount: 0, tiedLags: [], ambiguous: false };
+    return empty;
   }
 
-  // ไม่ seed ด้วย 0 — ไม่งั้น insertion-order + strict > ทำให้ 0 ชนะ tie เสมอ
+  // สแกนกว้าง — ห้าม filter ด้วย fine window ตอนสร้าง candidate (นั่นคือบั๊ก alias เดิม)
   const candidates = new Set();
   const step = Math.max(1, Math.floor(imuTimes.length / 12));
   for (let i = 0; i < imuTimes.length; i += step) {
     for (let j = 0; j < mocapTimes.length; j += step) {
       const lag = imuTimes[i] - mocapTimes[j];
-      if (Math.abs(lag) <= maxLagS) candidates.add(Math.round(lag * 100) / 100);
+      if (Math.abs(lag) <= rivalScanMaxLagS) {
+        candidates.add(Math.round(lag * 100) / 100);
+      }
     }
   }
   if (!candidates.size) candidates.add(0);
 
-  let bestLag = 0;
-  let bestCount = -1;
-  let bestResidual = Infinity;
   const scored = [];
-
   for (const lag of candidates) {
     const { count, residualAbsSum } = countHsMatches(mocapTimes, imuTimes, lag, matchToleranceS);
     scored.push({ lag, count, residualAbsSum });
-    const betterCount = count > bestCount;
-    const betterResidual = count === bestCount && residualAbsSum < bestResidual - 1e-12;
-    if (betterCount || betterResidual) {
-      bestCount = count;
-      bestLag = lag;
-      bestResidual = residualAbsSum;
-    }
   }
 
+  function pickBest(pool) {
+    let bestLag = 0;
+    let bestCount = -1;
+    let bestResidual = Infinity;
+    for (const row of pool) {
+      const betterCount = row.count > bestCount;
+      const betterResidual = row.count === bestCount && row.residualAbsSum < bestResidual - 1e-12;
+      const closerCoarse = row.count === bestCount
+        && Math.abs(row.residualAbsSum - bestResidual) <= 1e-12
+        && Math.abs(row.lag - coarseLagS) < Math.abs(bestLag - coarseLagS);
+      if (betterCount || betterResidual || closerCoarse) {
+        bestCount = row.count;
+        bestLag = row.lag;
+        bestResidual = row.residualAbsSum;
+      }
+    }
+    return { bestLag, bestCount, bestResidual };
+  }
+
+  const inFine = scored.filter((s) => Math.abs(s.lag - coarseLagS) <= fineMaxLagS);
+  // มี trusted coarse → เลือกใน fine window; ไม่มี → เลือก global แล้วค่อย refuse ถ้ามี alias
+  const pool = trustedCoarse && inFine.length ? inFine : scored;
+  const { bestLag, bestCount, bestResidual } = pickBest(pool);
+
+  const nearBest = scored.filter((s) => (
+    s.count >= bestCount
+    || (bestCount >= 5 && s.count >= bestCount - 1)
+  ));
   const tiedLags = scored
     .filter((s) => s.count === bestCount)
+    .filter((s) => Math.abs(s.residualAbsSum - bestResidual) <= Math.max(1e-6, bestResidual * 0.05))
     .map((s) => s.lag)
     .sort((a, b) => a - b);
-  // ambiguous ถ้ามี lag อื่นที่ match เท่ากันและ residual ใกล้เคียง (±5%)
-  const ambiguous = tiedLags.filter((lag) => {
-    const row = scored.find((s) => s.lag === lag);
-    return row && Math.abs(row.residualAbsSum - bestResidual) <= Math.max(1e-6, bestResidual * 0.05);
-  }).length > 1;
+  const ambiguous = tiedLags.length > 1;
+
+  const bestMeanRes = bestCount > 0 ? bestResidual / bestCount : 0;
+  // rival = period alias จริง (residual ต่อคู่ใกล้กัน) — ซีรีส์สั้น/idle ใน tolerance ไม่นับ
+  const rivalLags = nearBest
+    .filter((s) => s.lag !== bestLag)
+    .filter((s) => Math.abs(s.lag - bestLag) > fineMaxLagS * 0.5)
+    .filter((s) => {
+      const meanRes = s.count > 0 ? s.residualAbsSum / s.count : Infinity;
+      return meanRes <= bestMeanRes + 0.005;
+    })
+    .map((s) => ({
+      lagS: s.lag,
+      matchCount: s.count,
+      deltaFromChosenS: s.lag - bestLag,
+    }))
+    .sort((a, b) => b.matchCount - a.matchCount);
+  const periodAliasRisk = rivalLags.length > 0;
+  const refuseForAlias = periodAliasRisk && !trustedCoarse;
+  const ok = bestCount > 0 && !refuseForAlias;
+  let reason = null;
+  if (!ok) {
+    if (bestCount <= 0) reason = 'no-hs-matches';
+    else if (refuseForAlias) reason = 'period-alias-rivals';
+    else if (ambiguous) reason = 'ambiguous-hs-lags';
+  }
 
   return {
     lagS: bestLag,
     matchCount: Math.max(0, bestCount),
     tiedLags,
     ambiguous,
+    periodAliasRisk,
+    rivalLags,
+    coarseLagS,
+    ok,
+    reason,
     residualAbsSum: bestResidual === Infinity ? null : bestResidual,
   };
 }
@@ -407,8 +476,12 @@ export function estimateSignalOnsetS(t, y, options = {}) {
   if (!(maxAbs > 0)) return null;
 
   // noise floor จากทั้งซีรีส์ (ช่วงนิ่งดึง p05 ลง) — ไม่ผูกกับ swing peak
+  // หน่วยต้องเป็น dps (เหมือน computeAngularVelocityDps / rawGyroToDps) —
+  // ค่า +12/+20 ด้านล่างเป็น dps floor; ถ้าส่ง rad/s onset จะไม่ยิง (safe fail)
   const noiseFloor = percentileSorted(sorted, 0.05);
-  const threshold = options.onsetThreshold ?? Math.max(noiseFloor * 5, noiseFloor + 12);
+  const absFloor = options.onsetAbsFloor ?? 12; // dps
+  const quietAbsFloor = options.leadingQuietAbsFloor ?? 20; // dps
+  const threshold = options.onsetThreshold ?? Math.max(noiseFloor * 5, noiseFloor + absFloor);
 
   const dts = [];
   for (let i = 1; i < t.length; i += 1) {
@@ -420,7 +493,8 @@ export function estimateSignalOnsetS(t, y, options = {}) {
   const minQuietS = options.minLeadingQuietS ?? 0.4;
   const minQuietSamples = Math.max(5, Math.round(minQuietS / dtMed));
   // gate เทียบกับ noise — ไม่ใช่ maxAbs×k (จะคร่อม stance ripple)
-  const quietLimit = options.leadingQuietMaxAbs ?? Math.max(noiseFloor * 8, noiseFloor + 20, threshold);
+  const quietLimit = options.leadingQuietMaxAbs
+    ?? Math.max(noiseFloor * 8, noiseFloor + quietAbsFloor, threshold);
 
   let run = 0;
   for (let i = 0; i < abs.length; i += 1) {
@@ -763,6 +837,7 @@ export function extractImuGyroSeries(trace, side, options = {}) {
 /**
  * จับคู่ 1:1 ตามเวลาหลังชดเชย lag — greedy nearest ใน tolerance
  * ถ้า options.lagS ถูกกำหนด (เช่น จาก signal xcorr) จะใช้ค่านี้แทนการประมาณจาก HS events
+ * ถ้า HS-event lag ปฏิเสธ (period alias ไม่มี coarse) → ไม่จับคู่ (pairs=[]) ดีกว่าคู่ผิด stride
  */
 export function pairCyclesByTime(mocapCycles, imuCycles, options = {}) {
   const matchToleranceS = options.matchToleranceS ?? DEFAULT_MATCH_TOLERANCE_S;
@@ -775,6 +850,11 @@ export function pairCyclesByTime(mocapCycles, imuCycles, options = {}) {
       matchCount: null,
       tiedLags: [options.lagS],
       ambiguous: false,
+      periodAliasRisk: false,
+      rivalLags: [],
+      ok: true,
+      reason: null,
+      coarseLagS: options.coarseLagS ?? options.lagS,
     };
     lagSource = options.lagSource || 'external';
   } else {
@@ -782,7 +862,41 @@ export function pairCyclesByTime(mocapCycles, imuCycles, options = {}) {
     lagSource = 'hs-event';
   }
 
-  const { lagS, matchCount: lagMatchHint, tiedLags, ambiguous } = lagInfo;
+  const {
+    lagS,
+    matchCount: lagMatchHint,
+    tiedLags,
+    ambiguous,
+    periodAliasRisk = false,
+    rivalLags = [],
+    ok: lagOk = true,
+    reason: lagReason = null,
+    coarseLagS = null,
+  } = lagInfo;
+
+  const emptyPairs = {
+    lagS,
+    lagSource,
+    lagMatchHint,
+    tiedLags: tiedLags || [],
+    lagAmbiguous: Boolean(ambiguous) || Boolean(periodAliasRisk),
+    periodAliasRisk: Boolean(periodAliasRisk),
+    rivalLags,
+    lagOk: false,
+    lagReason,
+    coarseLagS,
+    pairs: [],
+    unpairedMocap: mocapCycles.filter((c) => Number.isFinite(mocapCycleTimeS(c))).length,
+    unpairedImu: imuCycles.filter((c) => Number.isFinite(imuCycleTimeS(c))).length,
+    timingMetricValid: false,
+    meanTimeErrorS: null,
+    medianTimeErrorS: null,
+  };
+
+  // ปฏิเสธจับคู่เมื่อ HS path ไม่มั่นใจ — อย่าส่งคู่ผิด n สไตรด์ต่อไปคำนวณ metrics
+  if (lagSource === 'hs-event' && lagOk === false) {
+    return emptyPairs;
+  }
 
   const mocap = mocapCycles
     .map((c, index) => ({ c, index, t: mocapCycleTimeS(c) }))
@@ -826,6 +940,11 @@ export function pairCyclesByTime(mocapCycles, imuCycles, options = {}) {
     lagMatchHint,
     tiedLags: tiedLags || [],
     lagAmbiguous: Boolean(ambiguous),
+    periodAliasRisk: Boolean(periodAliasRisk),
+    rivalLags,
+    lagOk: true,
+    lagReason: null,
+    coarseLagS,
     pairs,
     unpairedMocap: mocap.length - pairs.length,
     unpairedImu: imu.length - pairs.length,
@@ -947,6 +1066,7 @@ export function compareMocapToImu(mocap, imuTrace, options = {}) {
       if (signalLag.ok) {
         alignOpts.lagS = signalLag.lagS;
         alignOpts.lagSource = 'signal-xcorr';
+        alignOpts.coarseLagS = signalLag.coarseLagS;
         if (signalLag.periodAliasRisk) {
           warnings.push(
             `ขา ${side}: signal xcorr มี rival peaks ใกล้เคียงที่ ±n·stride `
@@ -956,6 +1076,10 @@ export function compareMocapToImu(mocap, imuTrace, options = {}) {
           );
         }
       } else {
+        // เก็บ coarse จาก onset ไว้ให้ HS path — อย่าทิ้งทั้งที่หาได้แล้ว
+        if (signalLag.coarseFromOnset && Number.isFinite(signalLag.coarseLagS)) {
+          alignOpts.coarseLagS = signalLag.coarseLagS;
+        }
         const detail = signalLag.reason === 'polarity-mismatch' || signalLag.reason === 'inverted-polarity'
           ? `peak(+)=${Number.isFinite(signalLag.peakCorr) ? signalLag.peakCorr.toFixed(2) : '—'} `
             + `< peak(−)=${Number.isFinite(signalLag.peakCorrMinus) ? signalLag.peakCorrMinus.toFixed(2) : '—'} `
@@ -969,9 +1093,14 @@ export function compareMocapToImu(mocap, imuTrace, options = {}) {
               : signalLag.reason === 'ambiguous-period-peaks'
                 ? `peak ใกล้เคียงกันหลายจุด (rival ${signalLag.rivalPeaks?.slice(0, 3).map((p) => `${p.lagS.toFixed(3)}s`).join(', ')})`
                 : signalLag.reason;
+        const pairingRisk = signalLag.periodAliasRisk
+          ? ' — การจับคู่ cycle อาจคลาด n สไตรด์ถ้า HS path ไม่มี coarse; จะปฏิเสธจับคู่ถ้า HS ก็ alias'
+          : '';
         warnings.push(
-          `ขา ${side}: signal xcorr ใช้ไม่ได้ (${detail}) — fallback เป็น HS-event lag `
-          + '(residual timing ไม่ใช่เมตริก detector bias)',
+          `ขา ${side}: signal xcorr ใช้ไม่ได้ (${detail}) — ลอง HS-event lag`
+          + `${Number.isFinite(alignOpts.coarseLagS) ? ` (ส่ง coarseLag=${alignOpts.coarseLagS.toFixed(3)}s จาก onset)` : ''}`
+          + pairingRisk
+          + ' (residual timing ไม่ใช่เมตริก detector bias)',
         );
       }
     } else if (mocapCycles.length && imuCycles.length) {
@@ -983,7 +1112,15 @@ export function compareMocapToImu(mocap, imuTrace, options = {}) {
 
     const alignment = pairCyclesByTime(mocapCycles, imuCycles, alignOpts);
     const usePaired = alignment.pairs.length > 0;
-    if (!usePaired && mocapCycles.length && imuCycles.length) {
+    if (alignment.lagOk === false && alignment.periodAliasRisk) {
+      warnings.push(
+        `ขา ${side}: HS-event lag ปฏิเสธเพราะ period-alias rivals `
+        + `(เลือกได้ ${Number.isFinite(alignment.lagS) ? alignment.lagS.toFixed(3) : '—'}s แต่มี `
+        + `${(alignment.rivalLags || []).slice(0, 3).map((r) => `${r.lagS.toFixed(2)}s`).join(', ') || 'rivals'}) `
+        + '— ไม่จับคู่ cycle (session-mean fallback); ใส่ --lag / heel-tap ก่อนเทียบพารามิเตอร์ต่อก้าว '
+        + 'มิฉะนั้น metrics จะดูสวยทั้งที่จับผิด stride',
+      );
+    } else if (!usePaired && mocapCycles.length && imuCycles.length) {
       warnings.push(`ขา ${side}: จับคู่ตามเวลาไม่ได้ — fallback เป็นค่าเฉลี่ยทั้ง session (อาจรวมช่วงยืนนิ่ง)`);
     } else if (usePaired && (alignment.unpairedMocap > 0 || alignment.unpairedImu > 0)) {
       warnings.push(
@@ -992,7 +1129,7 @@ export function compareMocapToImu(mocap, imuTrace, options = {}) {
         + `lag=${alignment.lagS.toFixed(2)}s via ${alignment.lagSource})`,
       );
     }
-    if (alignment.lagAmbiguous) {
+    if (alignment.lagAmbiguous && alignment.lagOk !== false) {
       warnings.push(
         `ขา ${side}: มี lag หลายค่าที่ match เท่ากัน (${alignment.tiedLags.slice(0, 5).join(', ')}…) `
         + '— เลือกจาก residual ต่ำสุดแล้ว แต่ควรตรวจ sync',
@@ -1024,6 +1161,9 @@ export function compareMocapToImu(mocap, imuTrace, options = {}) {
           : 'session-mean-fallback',
         lagS: alignment.lagS,
         lagSource: alignment.lagSource,
+        lagOk: alignment.lagOk !== false,
+        coarseLagS: alignment.coarseLagS ?? signalLag?.coarseLagS ?? null,
+        coarseFromOnset: Boolean(signalLag?.coarseFromOnset),
         signalPeakCorr: signalLag?.ok ? signalLag.peakCorr : null,
         peakCorrMinus: signalLag?.peakCorrMinus ?? null,
         polarityIndeterminate: signalLag?.polarityIndeterminate ?? false,
@@ -1035,8 +1175,9 @@ export function compareMocapToImu(mocap, imuTrace, options = {}) {
         timingMetricValid: Boolean(
           alignment.timingMetricValid
           && !signalLag?.periodAliasRisk
+          && !alignment.periodAliasRisk
         ),
-        periodAliasRisk: Boolean(signalLag?.periodAliasRisk),
+        periodAliasRisk: Boolean(signalLag?.periodAliasRisk || alignment.periodAliasRisk),
         meanTimeErrorS: alignment.meanTimeErrorS,
         medianTimeErrorS: alignment.medianTimeErrorS,
       },
@@ -1083,7 +1224,7 @@ export function compareMocapToImu(mocap, imuTrace, options = {}) {
     notes: [
       'Clearance ไม่เทียบอัตโนมัติ — MoCap วัดข้อเท้า, IMU double-integrate คนละตำแหน่ง',
       'Stance% คนละนิยาม event ได้ (MoCap = ankle velocity quiet, IMU = gyro HS/TO); MoCap foot-velocity มี bias stance ~−3% vs synthetic GT',
-      'Align: coarse onset |ω| → fine xcorr; สแกน rival ±5s — ถ้ามี period alias โดยไม่มี onset/heel-tap จะไม่ยอม sync เงียบ',
+      'Align: signal xcorr → HS-event; ทั้งสองสแกน rival กว้าง — period alias โดยไม่มี coarse/--lag จะไม่จับคู่ cycle (session-mean fallback)',
       'HS timing residual ใช้ได้เฉพาะ signal-xcorr ที่ไม่มี periodAliasRisk — แนะนำ heel-tap 1 ครั้งก่อนเดินใน SOP',
       'peakShankAngleDeg: ทั้งสองฝั่งใช้ช่วง HS→HS แล้ว; ยังมี mounting angle offset คนละศูนย์ (ควร calibrate ตอนยืนนิ่ง)',
       'stepLength=stride/2 และ doubleSupport≈2·stance−100 สมมติสมมาตร L/R — พังกับ stroke; ต้อง bilateral HS/TO จริง',

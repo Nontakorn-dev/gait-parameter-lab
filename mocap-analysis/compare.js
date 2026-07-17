@@ -57,7 +57,10 @@ function printSide(side, block) {
   if (align) {
     console.log(
       `  align: ${align.mode}  lag=${fmt(align.lagS, 3)}s  source=${align.lagSource || '—'}`
+      + (align.coarseFromOnset ? '  coarse=onset' : '')
+      + (Number.isFinite(align.coarseLagS) && !align.coarseFromOnset ? `  coarse=${fmt(align.coarseLagS, 3)}s` : '')
       + (align.periodAliasRisk ? '  ⚠️ period-alias' : '')
+      + (align.lagOk === false ? '  (pairing refused)' : '')
       + (align.timingMetricValid ? '' : '  (HS timing n/a)'),
     );
   }

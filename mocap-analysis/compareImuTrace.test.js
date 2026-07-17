@@ -248,9 +248,88 @@ test('🔴 pairCyclesByTime: จับคู่หลังมี lag คงท�
 test('🔴 estimateHsTimeLagS: ไม่ให้ 0 ชนะ tie เมื่อ residual แย่กว่า (lag จริง 0.35s)', () => {
   const mocap = [0, 1, 2, 3].map((t) => ({ hsStartTimeS: t }));
   const imu = [0.35, 1.35, 2.35, 3.35].map((t) => ({ cycleStartTimeS: t }));
-  const { lagS, matchCount } = estimateHsTimeLagS(mocap, imu, { matchToleranceS: 0.40 });
+  const { lagS, matchCount, ok } = estimateHsTimeLagS(mocap, imu, { matchToleranceS: 0.40 });
   assert.equal(matchCount, 4);
+  assert.equal(ok, true);
   assert.ok(Math.abs(lagS - 0.35) < 0.05, `ควรได้ ~0.35 ไม่ใช่ 0 ได้ ${lagS}`);
+});
+
+test('🔴 estimateHsTimeLagS: lag นอก fine window โดยไม่มี coarse → ไม่เงียบ alias', () => {
+  const stride = 1.1;
+  const mocap = Array.from({ length: 10 }, (_, i) => ({ hsStartTimeS: i * stride }));
+  for (const trueLag of [1.2, 2.0, 3.3]) {
+    const imu = mocap.map((c) => ({ cycleStartTimeS: c.hsStartTimeS + trueLag }));
+    const result = estimateHsTimeLagS(mocap, imu, { rivalScanMaxLagS: 5, matchToleranceS: 0.40 });
+    assert.equal(result.ok, false, `trueLag=${trueLag} ต้องไม่ ok เงียบ ได้ lagS=${result.lagS}`);
+    assert.equal(result.periodAliasRisk, true, `trueLag=${trueLag} ต้อง flag alias`);
+    assert.equal(result.reason, 'period-alias-rivals');
+  }
+});
+
+test('🔴 estimateHsTimeLagS: มี coarseLag → จับ lag ใหญ่ได้แม้มี rival', () => {
+  const stride = 1.1;
+  const mocap = Array.from({ length: 10 }, (_, i) => ({ hsStartTimeS: i * stride }));
+  for (const trueLag of [0.10, 1.20, 2.00, 3.30]) {
+    const imu = mocap.map((c) => ({ cycleStartTimeS: c.hsStartTimeS + trueLag }));
+    const result = estimateHsTimeLagS(mocap, imu, {
+      coarseLagS: trueLag,
+      rivalScanMaxLagS: 5,
+      matchToleranceS: 0.40,
+    });
+    assert.equal(result.ok, true, `trueLag=${trueLag} reason=${result.reason}`);
+    assert.ok(Math.abs(result.lagS - trueLag) < 0.05, `ได้ ${result.lagS} want ${trueLag}`);
+  }
+});
+
+test('🔴 pairCyclesByTime: HS alias → ไม่จับคู่ (ดีกว่าคู่ผิด stride)', () => {
+  const stride = 1.1;
+  const mocap = Array.from({ length: 10 }, (_, i) => ({
+    hsStartTimeS: i * stride,
+    strideLengthM: 1.2,
+    cadenceSpm: 110,
+    walkingSpeedMps: 1.1,
+    stancePct: 60,
+    peakShankAngleDeg: 30,
+  }));
+  const trueLag = 1.2;
+  const imu = mocap.map((c) => ({
+    cycleStartTimeS: c.hsStartTimeS + trueLag,
+    strideLengthM: 1.21,
+    cadenceSpm: 109,
+    walkingSpeedMps: 1.1,
+    stancePct: 59,
+    peakShankAngleDeg: 31,
+  }));
+  const aligned = pairCyclesByTime(mocap, imu, { rivalScanMaxLagS: 5 });
+  assert.equal(aligned.lagOk, false);
+  assert.equal(aligned.periodAliasRisk, true);
+  assert.equal(aligned.pairs.length, 0, 'ห้ามจับคู่ผิด stride เงียบ');
+  assert.equal(aligned.lagSource, 'hs-event');
+});
+
+test('🔴 pairCyclesByTime: ส่ง coarseLag จาก onset → จับคู่ถูกแม้ xcorr ปฏิเสธ', () => {
+  const stride = 1.1;
+  const mocap = Array.from({ length: 10 }, (_, i) => ({
+    hsStartTimeS: i * stride,
+    strideLengthM: 1.2,
+    cadenceSpm: 110,
+    walkingSpeedMps: 1.1,
+    stancePct: 60,
+    peakShankAngleDeg: 30,
+  }));
+  const trueLag = 2.0;
+  const imu = mocap.map((c) => ({
+    cycleStartTimeS: c.hsStartTimeS + trueLag,
+    strideLengthM: 1.21,
+    cadenceSpm: 109,
+    walkingSpeedMps: 1.1,
+    stancePct: 59,
+    peakShankAngleDeg: 31,
+  }));
+  const aligned = pairCyclesByTime(mocap, imu, { coarseLagS: trueLag, rivalScanMaxLagS: 5 });
+  assert.equal(aligned.lagOk, true);
+  assert.ok(aligned.pairs.length >= 8, `ได้ ${aligned.pairs.length}`);
+  assert.ok(Math.abs(aligned.lagS - trueLag) < 0.05);
 });
 
 function gaitLike(t, stride = 1.1) {
