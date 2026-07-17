@@ -189,6 +189,27 @@ test('reset() เคลียร์ pendingCycleDiagnostics ที่ยัง�
   assert.deepEqual(proc.pendingCycleDiagnostics, []);
 });
 
+test('🔴 addSample: ขาดแกน → ข้าม; ขาด timestamp → synthetic flag (ไม่ใช้ Date.now)', () => {
+  const proc = new GaitProcessor();
+  proc.addSample({ timestampMs: 100, ax: 0, ay: 0, az: 4096 }); // ไม่มี gyro
+  assert.equal(proc.buffer.length, 0);
+  assert.equal(proc.skippedIncompleteSampleCount, 1);
+
+  proc.addSample({ timestampMs: 100, ax: 0, ay: 0, az: 4096, gx: 0, gy: 0, gz: 0 });
+  assert.equal(proc.buffer.length, 1);
+  assert.equal(proc.usedSyntheticTimestamps, false);
+  const tAfterFirst = proc.buffer[0].timestampMs;
+
+  proc.addSample({ ax: 0, ay: 0, az: 4096, gx: 0, gy: 0, gz: 0 });
+  assert.equal(proc.usedSyntheticTimestamps, true);
+  assert.ok(proc.missingTimestampCount >= 1);
+  assert.equal(proc.buffer.length, 2);
+  assert.ok(
+    Math.abs(proc.buffer[1].timestampMs - (tAfterFirst + 10)) < 1e-9,
+    `ต้อง interpolate จาก sample ก่อน +10ms ได้ ${proc.buffer[1].timestampMs} (ไม่ใช่ Date.now)`,
+  );
+});
+
 test('🔴 resolveTimestampMs: relative board clock → session-relative ที่ reproducible', async () => {
   // ใช้ samples ชุดเดียวกันข้าม 2 รอบ — ถ้ายังผูก Date.now() ค่าจะต่างกันหลัง sleep
   const { samples } = generateWalkingData({ numStrides: 4, strideTime: 1.05 });

@@ -332,27 +332,28 @@ function findStepIntegrationWindow(smoothedAngVel, timestamps, cycle) {
 
 function normalizeTimestampField(sample) {
   if (Number.isFinite(sample.timestampMs)) {
-    return { valueMs: sample.timestampMs, isAbsolute: sample.timestampMs >= EPOCH_THRESHOLD_MS };
+    return { valueMs: sample.timestampMs, isAbsolute: sample.timestampMs >= EPOCH_THRESHOLD_MS, missing: false };
   }
 
   if (Number.isFinite(sample.timestamp_ms)) {
-    return { valueMs: sample.timestamp_ms, isAbsolute: sample.timestamp_ms >= EPOCH_THRESHOLD_MS };
+    return { valueMs: sample.timestamp_ms, isAbsolute: sample.timestamp_ms >= EPOCH_THRESHOLD_MS, missing: false };
   }
 
   if (Number.isFinite(sample.timestamp)) {
     const timestampValue = sample.timestamp;
     if (timestampValue >= EPOCH_THRESHOLD_MS) {
-      return { valueMs: timestampValue, isAbsolute: true };
+      return { valueMs: timestampValue, isAbsolute: true, missing: false };
     }
 
     if (Math.abs(timestampValue) < 1e9) {
-      return { valueMs: timestampValue * 1000, isAbsolute: false };
+      return { valueMs: timestampValue * 1000, isAbsolute: false, missing: false };
     }
 
-    return { valueMs: timestampValue, isAbsolute: false };
+    return { valueMs: timestampValue, isAbsolute: false, missing: false };
   }
 
-  return { valueMs: Date.now(), isAbsolute: true };
+  // ห้าม Date.now() — ทำให้ sync กับ MoCap ไม่ reproducible (เสีย validation ทั้งชุด)
+  return { valueMs: null, isAbsolute: false, missing: true };
 }
 
 function getRawAxis(sample, key, arrayKey, arrayIndex) {
@@ -364,14 +365,17 @@ function getRawAxis(sample, key, arrayKey, arrayIndex) {
     return sample[arrayKey][arrayIndex];
   }
 
-  return 0;
+  return null;
 }
 
 function readGyroDps(sample, gyroBiasDps) {
+  const gxRaw = getRawAxis(sample, 'gx', 'raw_gyro', 0);
+  const gyRaw = getRawAxis(sample, 'gy', 'raw_gyro', 1);
+  const gzRaw = getRawAxis(sample, 'gz', 'raw_gyro', 2);
   return {
-    gx: rawGyroToDps(getRawAxis(sample, 'gx', 'raw_gyro', 0)) - (gyroBiasDps?.gx ?? 0),
-    gy: rawGyroToDps(getRawAxis(sample, 'gy', 'raw_gyro', 1)) - (gyroBiasDps?.gy ?? 0),
-    gz: rawGyroToDps(getRawAxis(sample, 'gz', 'raw_gyro', 2)) - (gyroBiasDps?.gz ?? 0),
+    gx: Number.isFinite(gxRaw) ? rawGyroToDps(gxRaw) - (gyroBiasDps?.gx ?? 0) : NaN,
+    gy: Number.isFinite(gyRaw) ? rawGyroToDps(gyRaw) - (gyroBiasDps?.gy ?? 0) : NaN,
+    gz: Number.isFinite(gzRaw) ? rawGyroToDps(gzRaw) - (gyroBiasDps?.gz ?? 0) : NaN,
   };
 }
 
@@ -404,6 +408,9 @@ export class GaitProcessor {
     this.lastSourceTimestampMs = null;
     this.gyroBiasDps = { gx: 0, gy: 0, gz: 0 };
     this.calibration = null;
+    this.usedSyntheticTimestamps = false;
+    this.missingTimestampCount = 0;
+    this.skippedIncompleteSampleCount = 0;
     this.processedData = {
       timestamps: [],
       angularVelocity: [],
@@ -447,13 +454,27 @@ export class GaitProcessor {
   }
 
   addSample(sample) {
-    const timestampMs = this.resolveTimestampMs(sample);
-    const dtSeconds = this.getSampleIntervalSeconds(timestampMs);
+    const axRaw = getRawAxis(sample, 'ax', 'raw_accel', 0);
+    const ayRaw = getRawAxis(sample, 'ay', 'raw_accel', 1);
+    const azRaw = getRawAxis(sample, 'az', 'raw_accel', 2);
     const gyro = readGyroDps(sample, this.gyroBiasDps);
+    // แกนหาย → ห้ามแทน 0 (จะหลอกว่านิ่ง/ไม่มีหมุน → HS/ZUPT ผิด)
+    if (![axRaw, ayRaw, azRaw, gyro.gx].every(Number.isFinite)) {
+      this.skippedIncompleteSampleCount += 1;
+      return;
+    }
+
+    const timestampMs = this.resolveTimestampMs(sample);
+    if (!Number.isFinite(timestampMs)) {
+      this.skippedIncompleteSampleCount += 1;
+      return;
+    }
+
+    const dtSeconds = this.getSampleIntervalSeconds(timestampMs);
     const gx = gyro.gx;
-    const aXg = rawAccelToG(getRawAxis(sample, 'ax', 'raw_accel', 0));
-    const aYg = rawAccelToG(getRawAxis(sample, 'ay', 'raw_accel', 1));
-    const aZg = rawAccelToG(getRawAxis(sample, 'az', 'raw_accel', 2));
+    const aXg = rawAccelToG(axRaw);
+    const aYg = rawAccelToG(ayRaw);
+    const aZg = rawAccelToG(azRaw);
     const accelAngle = accelToAngle(aYg, aZg);
     // ‖accel‖ (3 แกน) ใช้ gate ความเชื่อ accel: ใกล้ 1g = gravity ล้วน, เบี่ยงมาก = มี motion accel
     const accelMagnitudeG = Math.sqrt(aXg * aXg + aYg * aYg + aZg * aZg);
@@ -798,6 +819,9 @@ export class GaitProcessor {
     this.lastRelativeDeltaMs = 1000 / SAMPLE_RATE;
     this.absoluteTimestampOriginMs = null;
     this.lastSourceTimestampMs = null;
+    this.usedSyntheticTimestamps = false;
+    this.missingTimestampCount = 0;
+    this.skippedIncompleteSampleCount = 0;
     const preservedCalibration = this.calibration;
     const preservedBias = { ...this.gyroBiasDps };
     this.gyroBiasDps = preservedBias;
@@ -813,7 +837,16 @@ export class GaitProcessor {
   }
 
   resolveTimestampMs(sample) {
-    const { valueMs, isAbsolute } = normalizeTimestampField(sample);
+    const { valueMs, isAbsolute, missing } = normalizeTimestampField(sample);
+    if (missing || !Number.isFinite(valueMs)) {
+      this.missingTimestampCount += 1;
+      this.usedSyntheticTimestamps = true;
+      // interpolate จาก sample ก่อนหน้าเท่านั้น — ไม่ใช้ wall clock
+      if (Number.isFinite(this.latestSampleTimestampMs)) {
+        return this.latestSampleTimestampMs + (1000 / SAMPLE_RATE);
+      }
+      return 0;
+    }
     if (isAbsolute) {
       this.lastSourceTimestampMs = valueMs;
       return valueMs;

@@ -129,19 +129,35 @@ test('🟠 reprocess: stancePct ต้อง upgrade จาก null เป็น
   );
 });
 
-test('compareMocapToImu: เมื่อ MoCap = IMU (synthetic) error ใกล้ 0', () => {
+test('compareMocapToImu: เมื่อ MoCap = IMU (synthetic smoke) + --lag → primary error ใกล้ 0', () => {
+  // ⚠️ smoke plumbing เท่านั้น — ไม่ใช่ independent MoCap GT
   const trace = buildDemoTrace({ numStrides: 6, side: 'R' });
   const imu = reprocessImuTrace(trace);
   const mocap = fakeMocapFromImuCycles(imu.bySide.R, 'R');
-  const report = compareMocapToImu(mocap, trace);
+  const report = compareMocapToImu(mocap, trace, { align: { lagS: 0 }, minAgreementPairs: 1 });
 
   assert.equal(report.ok, true);
   const strideRow = report.sides.R.metrics.find((m) => m.metric === 'strideLengthM');
-  assert.ok(strideRow.comparable);
-  assert.ok(Math.abs(strideRow.errorPct) < 5, `errorPct=${strideRow.errorPct} ควรใกล้ 0 เมื่อ GT สร้างจาก IMU เดียวกัน`);
+  assert.ok(strideRow.comparable, 'ต้องมี --lag จึง comparable');
+  assert.ok(Math.abs(strideRow.errorPct) < 5, `errorPct=${strideRow.errorPct}`);
+  const stanceRow = report.sides.R.metrics.find((m) => m.metric === 'stancePct');
+  assert.equal(stanceRow.comparable, false, 'stance เป็น exploratory');
+  const peakRow = report.sides.R.metrics.find((m) => m.metric === 'peakShankAngleDeg');
+  assert.equal(peakRow.comparable, false, 'peak เป็น exploratory');
 });
 
-test('compareMocapToImu: ไม่มี samples แต่มี cycles[] ยังเทียบ stride ได้', () => {
+test('compareMocapToImu: ไม่มี sync → comparable=false (fail-closed)', () => {
+  const trace = buildDemoTrace({ numStrides: 6, side: 'R' });
+  const imu = reprocessImuTrace(trace);
+  const mocap = fakeMocapFromImuCycles(imu.bySide.R, 'R');
+  // ไม่มี signals + ไม่ส่ง --lag → ห้ามเผยแพร่ error%
+  const report = compareMocapToImu(mocap, trace);
+  assert.equal(report.validationPublishable, false);
+  const strideRow = report.sides.R.metrics.find((m) => m.metric === 'strideLengthM');
+  assert.equal(strideRow.comparable, false);
+});
+
+test('compareMocapToImu: ไม่มี samples แต่มี cycles[] — informational เท่านั้น', () => {
   const mocap = {
     perSide: {
       L: { cycles: [] },
@@ -167,9 +183,9 @@ test('compareMocapToImu: ไม่มี samples แต่มี cycles[] ยั
   const report = compareMocapToImu(mocap, imuTrace);
   assert.equal(report.ok, true);
   assert.equal(report.imuSource, 'trace-cycles');
+  assert.equal(report.validationPublishable, false);
   const strideRow = report.sides.R.metrics.find((m) => m.metric === 'strideLengthM');
-  assert.ok(strideRow.comparable);
-  assert.ok(Math.abs(strideRow.errorPct - 10) < 1e-6);
+  assert.equal(strideRow.comparable, false, 'ไม่มี sync/pairing ที่ trusted');
   const cadenceRow = report.sides.R.metrics.find((m) => m.metric === 'cadenceSpm');
   assert.equal(cadenceRow.comparable, false, 'cycles[] อย่างเดียวไม่มี cadence');
 });

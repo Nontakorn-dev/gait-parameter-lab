@@ -13,11 +13,12 @@ import { applyAxisMap } from '../src/gateway/realtimeSensorUtils.js';
 import { minFinite, maxFinite } from '../src/util/finiteStats.js';
 
 const COMPARE_KEYS = [
-  { key: 'strideLengthM', unit: 'm' },
-  { key: 'cadenceSpm', unit: 'spm' },
-  { key: 'walkingSpeedMps', unit: 'm/s' },
-  { key: 'stancePct', unit: '%' },
-  { key: 'peakShankAngleDeg', unit: 'deg' },
+  { key: 'strideLengthM', unit: 'm', agreementClass: 'primary' },
+  { key: 'cadenceSpm', unit: 'spm', agreementClass: 'primary' },
+  { key: 'walkingSpeedMps', unit: 'm/s', agreementClass: 'primary' },
+  // exploratory: นิยามคนละแบบ / มี mounting offset — โชว์ตัวเลขได้แต่ห้ามเคลม agreement
+  { key: 'stancePct', unit: '%', agreementClass: 'exploratory', ineligibleReason: 'different-hs-to-definitions' },
+  { key: 'peakShankAngleDeg', unit: 'deg', agreementClass: 'exploratory', ineligibleReason: 'mounting-angle-offset' },
 ];
 
 const DEFAULT_MATCH_TOLERANCE_S = 0.40;
@@ -33,6 +34,8 @@ const AMBIGUOUS_PEAK_RATIO = 0.95;
 const POLARITY_PEAK_MARGIN = 0.05;
 const SIGNAL_LAG_SYSTEMATIC_UNCERTAINTY_S = 0.003;
 const ONSET_SUSTAIN_S = 0.08;
+const DEFAULT_MAX_ZUPT_DEV_G = 0.25;
+const DEFAULT_MIN_AGREEMENT_PAIRS = 3;
 
 function mean(values) {
   const finite = values.filter(Number.isFinite);
@@ -125,6 +128,9 @@ function cycleEntryFromParams(params, side, sensorKey) {
     strideTimeS: params.strideTime,
     peakShankAngleDeg: params.peakShankAngle,
     clearanceM: params.clearance,
+    temporalSource: params.temporalSource ?? null,
+    zuptAccelDeviationG: params.zuptAccelDeviationG ?? null,
+    zuptCheck: params.zuptCheck ?? null,
     cycleStartTimestampMs: params.cycleStartTimestampMs,
     // relative วินาทีนับจากต้น session ของ processor (= ต้น trace เมื่อ t_ms เป็น relative)
     cycleStartTimeS: Number.isFinite(params.cycleStartTimestampMs)
@@ -137,7 +143,23 @@ function shouldUpgradeCycle(existing, next) {
   // อัปเดตเมื่อได้ temporal metrics ที่เคยเป็น null (open/unresolved → measured)
   if (!Number.isFinite(existing.stancePct) && Number.isFinite(next.stancePct)) return true;
   if (!Number.isFinite(existing.strideLengthM) && Number.isFinite(next.strideLengthM)) return true;
+  // อัปเกรดคุณภาพ temporal / ZUPT metadata
+  if (existing.temporalSource !== 'measured-to' && next.temporalSource === 'measured-to') return true;
   return false;
+}
+
+/** ก้าวที่เอาเข้า agreement stats ได้ — ตัด clamp / ZUPT พัง / stance หลอก */
+export function isAgreementQualityImuCycle(cycle, options = {}) {
+  if (!cycle) return false;
+  if (cycle.strideLengthClamped) return false;
+  const temporal = cycle.temporalSource;
+  if (temporal === 'previous-valid-ratio' || temporal === 'unresolved') return false;
+  const maxZupt = options.maxZuptDevG ?? DEFAULT_MAX_ZUPT_DEV_G;
+  const zupt = cycle.zuptAccelDeviationG
+    ?? cycle.zuptCheck?.zuptAccelDeviationG
+    ?? null;
+  if (Number.isFinite(zupt) && zupt > maxZupt) return false;
+  return Number.isFinite(cycle.strideLengthM);
 }
 
 /**
@@ -167,6 +189,7 @@ export function reprocessImuTrace(trace, options = {}) {
   }
 
   const bySide = { L: [], R: [] };
+  const qualityFlags = [];
 
   for (const [sensorKey, sensorSamples] of bySensor) {
     const proc = new GaitProcessor();
@@ -182,7 +205,19 @@ export function reprocessImuTrace(trace, options = {}) {
     // t0 ของเซนเซอร์นี้ = sample แรกที่ valid (สำหรับ normalize เวลาถ้าเป็น absolute epoch)
     const firstT = sensorSamples.map((s) => s.timestampMs).find(Number.isFinite);
 
-    proc.onParams(({ params }) => {
+    proc.onParams(({ params, newCycleDiagnostics }) => {
+      if (newCycleDiagnostics?.length) {
+        for (const d of newCycleDiagnostics) {
+          const existing = seen.get(String(d.cycleKey));
+          if (!existing) continue;
+          if (d.strideLengthClamped != null) existing.strideLengthClamped = d.strideLengthClamped;
+          if (d.zuptCheck) {
+            existing.zuptCheck = d.zuptCheck;
+            existing.zuptAccelDeviationG = d.zuptCheck.zuptAccelDeviationG ?? existing.zuptAccelDeviationG;
+          }
+        }
+      }
+
       if (!params?.cycleKey) return;
       const side = params.side === 'L' || params.side === 'R' ? params.side : sideHint;
       if (side !== 'L' && side !== 'R') return;
@@ -217,13 +252,22 @@ export function reprocessImuTrace(trace, options = {}) {
       }
     }
     proc.analyze();
+
+    if (proc.usedSyntheticTimestamps || proc.missingTimestampCount > 0 || proc.skippedIncompleteSampleCount > 0) {
+      qualityFlags.push({
+        sensorKey,
+        usedSyntheticTimestamps: Boolean(proc.usedSyntheticTimestamps),
+        missingTimestampCount: proc.missingTimestampCount || 0,
+        skippedIncompleteSampleCount: proc.skippedIncompleteSampleCount || 0,
+      });
+    }
   }
 
   for (const side of ['L', 'R']) {
     bySide[side].sort((a, b) => (a.cycleStartTimeS ?? 0) - (b.cycleStartTimeS ?? 0));
   }
 
-  return { ok: true, reason: null, bySide, source: 'reprocess' };
+  return { ok: true, reason: null, bySide, source: 'reprocess', qualityFlags };
 }
 
 /** fallback: ใช้ cycles[] ใน trace (มีแค่ strideLength เป็นหลัก) */
@@ -976,7 +1020,8 @@ function summarizePaired(pairs) {
   return { mocap, imu };
 }
 
-function compareMeans(mocapSummary, imuSummary) {
+function compareMeans(mocapSummary, imuSummary, options = {}) {
+  const allowAgreement = options.allowAgreement !== false;
   const metricMap = {
     strideLengthM: ['meanStrideLengthM', 'meanStrideLengthM'],
     cadenceSpm: ['meanCadenceSpm', 'meanCadenceSpm'],
@@ -989,14 +1034,23 @@ function compareMeans(mocapSummary, imuSummary) {
     const [mKey, iKey] = metricMap[spec.key];
     const mocap = mocapSummary[mKey];
     const imu = imuSummary[iKey];
+    const finite = Number.isFinite(mocap) && Number.isFinite(imu);
+    const primary = spec.agreementClass === 'primary';
+    const comparable = allowAgreement && finite && primary;
+    let ineligibleReason = null;
+    if (!allowAgreement) ineligibleReason = 'pairing-not-trusted';
+    else if (!finite) ineligibleReason = 'missing-values';
+    else if (!primary) ineligibleReason = spec.ineligibleReason || 'exploratory-metric';
     return {
       metric: spec.key,
       unit: spec.unit,
+      agreementClass: spec.agreementClass,
       mocap,
       imu,
-      error: absError(imu, mocap),
-      errorPct: pctError(imu, mocap),
-      comparable: Number.isFinite(mocap) && Number.isFinite(imu),
+      error: comparable ? absError(imu, mocap) : null,
+      errorPct: comparable ? pctError(imu, mocap) : null,
+      comparable,
+      ineligibleReason,
     };
   });
 }
@@ -1025,8 +1079,29 @@ export function compareMocapToImu(mocap, imuTrace, options = {}) {
       ok: false,
       error: `อ่าน IMU ไม่ได้ (${imu.reason}). ต้องการ samples[] หรือ cycles[] ใน trace`,
       warnings,
+      validationPublishable: false,
     };
   }
+
+  const maxZuptDevG = options.maxZuptDevG ?? DEFAULT_MAX_ZUPT_DEV_G;
+  const minAgreementPairs = options.minAgreementPairs ?? DEFAULT_MIN_AGREEMENT_PAIRS;
+  const explicitLag = Number.isFinite(options.align?.lagS);
+
+  for (const flag of imu.qualityFlags || []) {
+    if (flag.usedSyntheticTimestamps || flag.missingTimestampCount > 0) {
+      warnings.push(
+        `เซนเซอร์ ${flag.sensorKey}: มี sample ไม่มี timestamp `
+        + `(missing=${flag.missingTimestampCount}) — เวลาถูก interpolate; `
+        + 'ห้ามใช้ผลนี้เป็น lab validation (ต้องมี t_ms จาก firmware)',
+      );
+    }
+    if (flag.skippedIncompleteSampleCount > 0) {
+      warnings.push(
+        `เซนเซอร์ ${flag.sensorKey}: ข้าม ${flag.skippedIncompleteSampleCount} sample ที่ขาดแกน accel/gyro`,
+      );
+    }
+  }
+  const hasSyntheticTimestamps = (imu.qualityFlags || []).some((f) => f.usedSyntheticTimestamps);
 
   const sides = {};
   for (const side of ['L', 'R']) {
@@ -1036,7 +1111,15 @@ export function compareMocapToImu(mocap, imuTrace, options = {}) {
     const imuSumAll = summarizeImuSide(imuCycles);
 
     if (mocapCycles.length === 0 && imuCycles.length === 0) {
-      sides[side] = { present: false, mocap: mocapSumAll, imu: imuSumAll, metrics: [], alignment: null };
+      sides[side] = {
+        present: false,
+        mocap: mocapSumAll,
+        imu: imuSumAll,
+        metrics: [],
+        alignment: null,
+        agreementPairCount: 0,
+        validationPublishable: false,
+      };
       continue;
     }
 
@@ -1111,18 +1194,49 @@ export function compareMocapToImu(mocap, imuTrace, options = {}) {
     }
 
     const alignment = pairCyclesByTime(mocapCycles, imuCycles, alignOpts);
-    const usePaired = alignment.pairs.length > 0;
+    const rawPaired = alignment.pairs.length > 0;
+    const agreementPairs = alignment.pairs.filter((p) => (
+      isAgreementQualityImuCycle(p.imu, { maxZuptDevG })
+    ));
+    const excludedPairCount = alignment.pairs.length - agreementPairs.length;
+    if (excludedPairCount > 0) {
+      warnings.push(
+        `ขา ${side}: ตัด ${excludedPairCount}/${alignment.pairs.length} คู่ ออกจาก agreement `
+        + '(clamp / ZUPT deviation / stance fallback) — เหลือใช้ได้ '
+        + `${agreementPairs.length} คู่`,
+      );
+    }
+
+    const syncTrusted = Boolean(
+      explicitLag
+      || alignment.lagSource === 'signal-xcorr'
+      || (signalLag?.coarseFromOnset && alignment.lagOk !== false && Number.isFinite(alignment.lagS))
+    );
+    // session-mean หรือ pairing ปฏิเสธ → ห้าม comparable metrics (เคยทำให้ error% ดูสวยทั้งที่ผิด)
+    const usePairedAgreement = rawPaired
+      && alignment.lagOk !== false
+      && syncTrusted
+      && agreementPairs.length >= minAgreementPairs
+      && !hasSyntheticTimestamps;
+
     if (alignment.lagOk === false && alignment.periodAliasRisk) {
       warnings.push(
         `ขา ${side}: HS-event lag ปฏิเสธเพราะ period-alias rivals `
         + `(เลือกได้ ${Number.isFinite(alignment.lagS) ? alignment.lagS.toFixed(3) : '—'}s แต่มี `
         + `${(alignment.rivalLags || []).slice(0, 3).map((r) => `${r.lagS.toFixed(2)}s`).join(', ') || 'rivals'}) `
-        + '— ไม่จับคู่ cycle (session-mean fallback); ใส่ --lag / heel-tap ก่อนเทียบพารามิเตอร์ต่อก้าว '
-        + 'มิฉะนั้น metrics จะดูสวยทั้งที่จับผิด stride',
+        + '— ไม่จับคู่ cycle; ใส่ --lag / heel-tap ก่อนเทียบ — ห้ามใช้ session-mean เป็น validation',
       );
-    } else if (!usePaired && mocapCycles.length && imuCycles.length) {
-      warnings.push(`ขา ${side}: จับคู่ตามเวลาไม่ได้ — fallback เป็นค่าเฉลี่ยทั้ง session (อาจรวมช่วงยืนนิ่ง)`);
-    } else if (usePaired && (alignment.unpairedMocap > 0 || alignment.unpairedImu > 0)) {
+    } else if (!rawPaired && mocapCycles.length && imuCycles.length) {
+      warnings.push(
+        `ขา ${side}: จับคู่ตามเวลาไม่ได้ — แสดงค่าเฉลี่ย session แบบ informational เท่านั้น `
+        + '(comparable=false; ห้ามใส่เปเปอร์)',
+      );
+    } else if (rawPaired && !syncTrusted) {
+      warnings.push(
+        `ขา ${side}: จับคู่ได้แต่ sync ไม่ trusted (ไม่มี --lag / signal-ok / onset coarse) `
+        + '— comparable=false จนกว่าจะมี heel-tap หรือ onset',
+      );
+    } else if (rawPaired && (alignment.unpairedMocap > 0 || alignment.unpairedImu > 0)) {
       warnings.push(
         `ขา ${side}: จับคู่ได้ ${alignment.pairs.length} คู่ `
         + `(MoCap ค้าง ${alignment.unpairedMocap}, IMU ค้าง ${alignment.unpairedImu}, `
@@ -1136,16 +1250,25 @@ export function compareMocapToImu(mocap, imuTrace, options = {}) {
       );
     }
 
-    const pairedSummary = usePaired ? summarizePaired(alignment.pairs) : null;
+    const pairedSummary = usePairedAgreement ? summarizePaired(agreementPairs) : null;
     const mocapForCompare = pairedSummary?.mocap ?? mocapSumAll;
     const imuForCompare = pairedSummary?.imu ?? imuSumAll;
+    const metrics = compareMeans(mocapForCompare, imuForCompare, {
+      allowAgreement: usePairedAgreement,
+    });
 
-    const nullStance = usePaired
-      ? alignment.pairs.filter((p) => !Number.isFinite(p.imu.stancePct)).length
+    const nullStance = usePairedAgreement
+      ? agreementPairs.filter((p) => !Number.isFinite(p.imu.stancePct)).length
       : imuCycles.filter((c) => !Number.isFinite(c.stancePct)).length;
     if (nullStance > 0 && imuCycles.length > 0) {
       warnings.push(`ขา ${side}: IMU มี ${nullStance} cycle ที่ stancePct=null (temporal unresolved)`);
     }
+
+    const sidePublishable = Boolean(
+      usePairedAgreement
+      && metrics.some((m) => m.comparable)
+      && !hasSyntheticTimestamps
+    );
 
     sides[side] = {
       present: true,
@@ -1153,15 +1276,19 @@ export function compareMocapToImu(mocap, imuTrace, options = {}) {
       imu: imuForCompare,
       mocapAll: mocapSumAll,
       imuAll: imuSumAll,
-      metrics: compareMeans(mocapForCompare, imuForCompare),
+      metrics,
       cycleCountDelta: imuSumAll.cycleCount - mocapSumAll.cycleCount,
+      agreementPairCount: agreementPairs.length,
+      excludedPairCount,
+      validationPublishable: sidePublishable,
       alignment: {
-        mode: usePaired
+        mode: usePairedAgreement
           ? (alignment.lagSource === 'signal-xcorr' ? 'signal-xcorr+hs-pair' : 'hs-event-lag')
-          : 'session-mean-fallback',
+          : (rawPaired ? 'paired-untrusted' : 'session-mean-informational'),
         lagS: alignment.lagS,
         lagSource: alignment.lagSource,
         lagOk: alignment.lagOk !== false,
+        syncTrusted,
         coarseLagS: alignment.coarseLagS ?? signalLag?.coarseLagS ?? null,
         coarseFromOnset: Boolean(signalLag?.coarseFromOnset),
         signalPeakCorr: signalLag?.ok ? signalLag.peakCorr : null,
@@ -1169,11 +1296,12 @@ export function compareMocapToImu(mocap, imuTrace, options = {}) {
         polarityIndeterminate: signalLag?.polarityIndeterminate ?? false,
         systematicUncertaintyS: signalLag?.systematicUncertaintyS ?? null,
         pairedCount: alignment.pairs.length,
+        agreementPairCount: agreementPairs.length,
         unpairedMocap: alignment.unpairedMocap,
         unpairedImu: alignment.unpairedImu,
-        // HS timing bias ใช้ได้เฉพาะเมื่อ sync มาจากสัญญาณ — ไม่ใช่จาก HS events เอง
         timingMetricValid: Boolean(
-          alignment.timingMetricValid
+          usePairedAgreement
+          && alignment.timingMetricValid
           && !signalLag?.periodAliasRisk
           && !alignment.periodAliasRisk
         ),
@@ -1182,6 +1310,46 @@ export function compareMocapToImu(mocap, imuTrace, options = {}) {
         medianTimeErrorS: alignment.medianTimeErrorS,
       },
     };
+  }
+
+  const presentSides = ['L', 'R'].filter((s) => sides[s]?.present);
+  const validationPublishable = presentSides.length > 0
+    && presentSides.every((s) => sides[s].validationPublishable)
+    && !hasSyntheticTimestamps;
+
+  const labChecklist = [
+    {
+      id: 'heel-tap-or-lag',
+      ok: explicitLag || presentSides.some((s) => sides[s].alignment?.coarseFromOnset || sides[s].alignment?.lagSource === 'signal-xcorr'),
+      detail: 'heel-tap 1 ครั้งก่อนเดิน + ใส่ --lag หรือมี onset/signal sync ที่ผ่าน',
+    },
+    {
+      id: 'paired-agreement-cycles',
+      ok: presentSides.every((s) => (sides[s].agreementPairCount || 0) >= minAgreementPairs),
+      detail: `อย่างน้อย ${minAgreementPairs} คู่คุณภาพต่อข้าง (ไม่ clamp / ZUPT ดี / stance วัดจริง)`,
+    },
+    {
+      id: 'no-synthetic-timestamps',
+      ok: !hasSyntheticTimestamps,
+      detail: 'ทุก sample ต้องมี t_ms จาก firmware',
+    },
+    {
+      id: 'primary-metrics-only',
+      ok: true,
+      detail: 'เคลมได้เฉพาะ strideLength / cadence / walkingSpeed — stance% และ peak° เป็น exploratory',
+    },
+    {
+      id: 'axis-map-verified',
+      ok: null,
+      detail: 'ตรวจแกน L/R ด้วย swing test ก่อนเก็บข้อมูล (ไม่ auto-verify ในโค้ด)',
+    },
+  ];
+
+  if (!validationPublishable) {
+    warnings.unshift(
+      '⛔ validationPublishable=false — ห้ามใช้ error%/ICC จากรายงานนี้ในเปเปอร์หรือ ethics '
+      + 'จนกว่า lab checklist จะผ่าน (ดู report.labChecklist); ใช้ --lab เพื่อบังคับ fail ตอน CI/รันแลป',
+    );
   }
 
   const mocapDistanceM = Number.isFinite(mocap?.session?.pelvisNetForwardDisplacementM)
@@ -1211,6 +1379,8 @@ export function compareMocapToImu(mocap, imuTrace, options = {}) {
     ok: true,
     imuSource: imu.source,
     warnings,
+    validationPublishable,
+    labChecklist,
     sides,
     session: {
       mocapPelvisNetForwardM: mocapDistanceM,
@@ -1222,12 +1392,13 @@ export function compareMocapToImu(mocap, imuTrace, options = {}) {
       distanceBySide,
     },
     notes: [
+      'validationPublishable=true เท่านั้นถึงจะเอา primary error% ไปใช้ในเปเปอร์ — มิฉะนั้นเป็น informational',
+      'Primary agreement: strideLength / cadence / walkingSpeed หลังจับคู่+กรองคุณภาพ',
+      'Exploratory (comparable=false): stancePct (คนละนิยาม event), peakShankAngleDeg (mounting offset)',
       'Clearance ไม่เทียบอัตโนมัติ — MoCap วัดข้อเท้า, IMU double-integrate คนละตำแหน่ง',
-      'Stance% คนละนิยาม event ได้ (MoCap = ankle velocity quiet, IMU = gyro HS/TO); MoCap foot-velocity มี bias stance ~−3% vs synthetic GT',
-      'Align: signal xcorr → HS-event; ทั้งสองสแกน rival กว้าง — period alias โดยไม่มี coarse/--lag จะไม่จับคู่ cycle (session-mean fallback)',
-      'HS timing residual ใช้ได้เฉพาะ signal-xcorr ที่ไม่มี periodAliasRisk — แนะนำ heel-tap 1 ครั้งก่อนเดินใน SOP',
-      'peakShankAngleDeg: ทั้งสองฝั่งใช้ช่วง HS→HS แล้ว; ยังมี mounting angle offset คนละศูนย์ (ควร calibrate ตอนยืนนิ่ง)',
-      'stepLength=stride/2 และ doubleSupport≈2·stance−100 สมมติสมมาตร L/R — พังกับ stroke; ต้อง bilateral HS/TO จริง',
+      'Align: signal xcorr → HS-event; period alias โดยไม่มี coarse/--lag จะไม่จับคู่',
+      'SOP แลป: heel-tap 1 ครั้งก่อนเดิน → ใส่ --lag; ยืนนิ่ง≥0.4s ก่อนเดินเพื่อ onset; ยืนยัน axis map',
+      'stepLength=stride/2 และ doubleSupport≈2·stance−100 สมมติสมมาตร L/R — พังกับ stroke',
       'sum(stride) ต่อข้าง ≠ ระยะเดินจริงแบบ 1:1 ถ้าสองข้างบันทึกพร้อมกัน (อย่าบวก L+R)',
     ],
   };
