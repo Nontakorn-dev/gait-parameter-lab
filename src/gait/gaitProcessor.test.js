@@ -15,7 +15,7 @@ function runPipeline({ stubStride } = {}) {
       velocityPreDriftCorrection: [0, 0.1, 0.2],
     });
   }
-  const { samples } = generateWalkingData({ numStrides: 12, strideTime: 1.05 });
+  const { samples } = generateWalkingData({ numStrides: 12, strideTime: 1.05, seed: 42 });
   const t0 = Date.now();
   let last = null;
   let lastDiagnostics = [];
@@ -34,7 +34,7 @@ function runPipeline({ stubStride } = {}) {
 // เพื่อทดสอบว่า diagnostics สะสมข้าม analyze() หลายครั้งได้ครบ ไม่ซ้ำ ไม่หาย
 function runStreaming({ numStrides, strideTime, analyzeEvery = 40 }) {
   const proc = new GaitProcessor();
-  const { samples } = generateWalkingData({ numStrides, strideTime });
+  const { samples } = generateWalkingData({ numStrides, strideTime, seed: 42 });
   const t0 = Date.now();
   const allDiagnostics = [];
   let sinceAnalyze = 0;
@@ -133,7 +133,7 @@ test('newCycleDiagnostics: shape ตรงตามที่ออกแบบ (
 
 test('newCycleDiagnostics: dedup — analyze() ซ้ำโดยไม่มี sample ใหม่ ไม่ยิง cycle เดิมซ้ำ', () => {
   const proc = new GaitProcessor();
-  const { samples } = generateWalkingData({ numStrides: 12, strideTime: 1.05 });
+  const { samples } = generateWalkingData({ numStrides: 12, strideTime: 1.05, seed: 42 });
   const t0 = Date.now();
   for (const s of samples) {
     proc.addSample({ ...s, timestampMs: t0 + Math.round(s.timestamp * 1000) });
@@ -152,7 +152,7 @@ test('newCycleDiagnostics: dedup — analyze() ซ้ำโดยไม่มี
 
 test('regression: หลาย listener ต้องได้ newCycleDiagnostics ชุดเดียวกันเท่ากันทุกตัว (ไม่ใช่ตัวแรกได้ ตัวหลัง [])', () => {
   const proc = new GaitProcessor();
-  const { samples } = generateWalkingData({ numStrides: 12, strideTime: 1.05 });
+  const { samples } = generateWalkingData({ numStrides: 12, strideTime: 1.05, seed: 42 });
   const t0 = Date.now();
   for (const s of samples) {
     proc.addSample({ ...s, timestampMs: t0 + Math.round(s.timestamp * 1000) });
@@ -179,7 +179,7 @@ test('newCycleDiagnostics: สะสมข้าม streaming ครบเท่
 
 test('reset() เคลียร์ pendingCycleDiagnostics ที่ยังไม่ถูก drain', () => {
   const proc = new GaitProcessor();
-  const { samples } = generateWalkingData({ numStrides: 12, strideTime: 1.05 });
+  const { samples } = generateWalkingData({ numStrides: 12, strideTime: 1.05, seed: 42 });
   const t0 = Date.now();
   for (const s of samples) {
     proc.addSample({ ...s, timestampMs: t0 + Math.round(s.timestamp * 1000) });
@@ -212,7 +212,7 @@ test('🔴 addSample: ขาดแกน → ข้าม; ขาด timestamp �
 
 test('🔴 resolveTimestampMs: relative board clock → session-relative ที่ reproducible', async () => {
   // ใช้ samples ชุดเดียวกันข้าม 2 รอบ — ถ้ายังผูก Date.now() ค่าจะต่างกันหลัง sleep
-  const { samples } = generateWalkingData({ numStrides: 4, strideTime: 1.05 });
+  const { samples } = generateWalkingData({ numStrides: 4, strideTime: 1.05, seed: 42 });
 
   function collectStarts() {
     const proc = new GaitProcessor();

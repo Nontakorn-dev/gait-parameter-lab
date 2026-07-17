@@ -134,7 +134,10 @@ function main() {
 
   for (const w of report.warnings || []) console.warn(`⚠️  ${w}`);
 
-  console.log(`\nvalidationPublishable: ${report.validationPublishable ? 'YES ✅' : 'NO ⛔'}`);
+  console.log(`\nvalidationPublishable: ${report.validationPublishable ? 'YES ✅' : 'NO ⛔'}`
+    + (report.validationPublishableBilateral === false && report.validationPublishable
+      ? ' (บางข้างเท่านั้น — ดู sides[L|R])'
+      : ''));
   if (report.labChecklist?.length) {
     console.log('labChecklist:');
     for (const item of report.labChecklist) {

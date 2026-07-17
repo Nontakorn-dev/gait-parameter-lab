@@ -15,8 +15,8 @@ import {
   estimateSignalOnsetS,
 } from './compareImuTrace.js';
 
-function buildDemoTrace({ numStrides = 8, side = 'R', boardEpochMs = 5000 } = {}) {
-  const { samples } = generateWalkingData({ numStrides, strideTime: 1.05 });
+function buildDemoTrace({ numStrides = 8, side = 'R', boardEpochMs = 5000, seed = 42 } = {}) {
+  const { samples } = generateWalkingData({ numStrides, strideTime: 1.05, seed });
   const rec = new TraceRecorder({ sampleRateHzNominal: 100 });
   const proc = new GaitProcessor();
 
@@ -119,7 +119,7 @@ test('reprocessImuTrace: ได้ cycles จาก demo samples', () => {
 });
 
 test('🟠 reprocess: stancePct ต้อง upgrade จาก null เป็นค่าเมื่อ temporal resolve', () => {
-  const trace = buildDemoTrace({ numStrides: 8, side: 'R' });
+  const trace = buildDemoTrace({ numStrides: 8, side: 'R', seed: 42 });
   const result = reprocessImuTrace(trace);
   assert.equal(result.ok, true);
   const withStance = result.bySide.R.filter((c) => Number.isFinite(c.stancePct));
@@ -127,6 +127,30 @@ test('🟠 reprocess: stancePct ต้อง upgrade จาก null เป็น
     withStance.length >= Math.floor(result.bySide.R.length * 0.5),
     `ควรได้ stancePct ส่วนใหญ่ ได้ ${withStance.length}/${result.bySide.R.length}`,
   );
+});
+
+test('🔴 generateWalkingData: seed เดียวกัน → series เหมือนกัน (ไม่ flaky)', () => {
+  const a = generateWalkingData({ numStrides: 5, strideTime: 1.05, seed: 99 });
+  const b = generateWalkingData({ numStrides: 5, strideTime: 1.05, seed: 99 });
+  const c = generateWalkingData({ numStrides: 5, strideTime: 1.05, seed: 100 });
+  assert.equal(a.samples.length, b.samples.length);
+  assert.deepEqual(
+    a.samples.map((s) => [s.ax, s.ay, s.az, s.gx]),
+    b.samples.map((s) => [s.ax, s.ay, s.az, s.gx]),
+  );
+  assert.notDeepEqual(
+    a.samples.map((s) => s.gx),
+    c.samples.map((s) => s.gx),
+  );
+});
+
+test('🔴 compare mode: --lag → external-lag ไม่ใช่ hs-event-lag', () => {
+  const trace = buildDemoTrace({ numStrides: 6, side: 'R', seed: 7 });
+  const imu = reprocessImuTrace(trace);
+  const mocap = fakeMocapFromImuCycles(imu.bySide.R, 'R');
+  const report = compareMocapToImu(mocap, trace, { align: { lagS: 0 }, minAgreementPairs: 1 });
+  assert.equal(report.sides.R.alignment.lagSource, 'external');
+  assert.equal(report.sides.R.alignment.mode, 'external-lag');
 });
 
 test('compareMocapToImu: เมื่อ MoCap = IMU (synthetic smoke) + --lag → primary error ใกล้ 0', () => {

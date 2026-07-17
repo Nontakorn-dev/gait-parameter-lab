@@ -121,6 +121,7 @@ function cycleEntryFromParams(params, side, sensorKey) {
     sensorKey,
     strideLengthM: params.strideLength,
     strideLengthClamped: params.strideLengthClamped ?? false,
+    strideLengthSignedM: params.strideLengthSignedM ?? null,
     cadenceSpm: params.cadence,
     walkingSpeedMps: params.walkingSpeed,
     stancePct: params.stancePct,
@@ -1055,6 +1056,17 @@ function compareMeans(mocapSummary, imuSummary, options = {}) {
   });
 }
 
+function alignmentMode(lagSource, usePairedAgreement, rawPaired) {
+  if (!usePairedAgreement) {
+    return rawPaired ? 'paired-untrusted' : 'session-mean-informational';
+  }
+  if (lagSource === 'signal-xcorr') return 'signal-xcorr+hs-pair';
+  if (lagSource === 'external' || lagSource === 'heel-tap' || lagSource === 'manual') {
+    return 'external-lag';
+  }
+  return 'hs-event-lag';
+}
+
 /**
  * @param {object} mocap - output จาก computeGaitFromMocap / run.js
  * @param {object} imuTrace - export จาก dashboard TraceRecorder
@@ -1282,9 +1294,7 @@ export function compareMocapToImu(mocap, imuTrace, options = {}) {
       excludedPairCount,
       validationPublishable: sidePublishable,
       alignment: {
-        mode: usePairedAgreement
-          ? (alignment.lagSource === 'signal-xcorr' ? 'signal-xcorr+hs-pair' : 'hs-event-lag')
-          : (rawPaired ? 'paired-untrusted' : 'session-mean-informational'),
+        mode: alignmentMode(alignment.lagSource, usePairedAgreement, rawPaired),
         lagS: alignment.lagS,
         lagSource: alignment.lagSource,
         lagOk: alignment.lagOk !== false,
@@ -1313,20 +1323,43 @@ export function compareMocapToImu(mocap, imuTrace, options = {}) {
   }
 
   const presentSides = ['L', 'R'].filter((s) => sides[s]?.present);
-  const validationPublishable = presentSides.length > 0
+  const publishableSides = presentSides.filter((s) => sides[s].validationPublishable);
+  // session-level: อย่างน้อยหนึ่งข้าง publishable — อย่าให้ขาเดียวพังฆ่าทั้ง session
+  const validationPublishable = publishableSides.length > 0 && !hasSyntheticTimestamps;
+  const validationPublishableBilateral = presentSides.length > 0
     && presentSides.every((s) => sides[s].validationPublishable)
     && !hasSyntheticTimestamps;
+
+  // สัญญาณ axis กลับ: strideLengthSigned ส่วนใหญ่ติดลบ
+  const signedStrides = presentSides.flatMap((s) => (imu.bySide[s] || [])
+    .map((c) => c.strideLengthSignedM)
+    .filter(Number.isFinite));
+  let axisMapOk = null;
+  if (signedStrides.length >= 3) {
+    const neg = signedStrides.filter((v) => v < 0).length;
+    axisMapOk = neg / signedStrides.length < 0.5;
+    if (!axisMapOk) {
+      warnings.push(
+        `axis-map: strideLengthSignedM ติดลบ ${neg}/${signedStrides.length} ก้าว `
+        + '— น่าจะแกน/ขั้วผิด; ตรวจ mount หรือ AXIS_MAP ก่อน validation',
+      );
+    }
+  }
 
   const labChecklist = [
     {
       id: 'heel-tap-or-lag',
-      ok: explicitLag || presentSides.some((s) => sides[s].alignment?.coarseFromOnset || sides[s].alignment?.lagSource === 'signal-xcorr'),
+      ok: explicitLag || presentSides.some((s) => (
+        sides[s].alignment?.coarseFromOnset
+        || sides[s].alignment?.lagSource === 'signal-xcorr'
+        || sides[s].alignment?.lagSource === 'external'
+      )),
       detail: 'heel-tap 1 ครั้งก่อนเดิน + ใส่ --lag หรือมี onset/signal sync ที่ผ่าน',
     },
     {
       id: 'paired-agreement-cycles',
-      ok: presentSides.every((s) => (sides[s].agreementPairCount || 0) >= minAgreementPairs),
-      detail: `อย่างน้อย ${minAgreementPairs} คู่คุณภาพต่อข้าง (ไม่ clamp / ZUPT ดี / stance วัดจริง)`,
+      ok: publishableSides.length > 0,
+      detail: `อย่างน้อยหนึ่งข้างมี ≥${minAgreementPairs} คู่คุณภาพ (ดู sides[L|R].validationPublishable)`,
     },
     {
       id: 'no-synthetic-timestamps',
@@ -1340,15 +1373,26 @@ export function compareMocapToImu(mocap, imuTrace, options = {}) {
     },
     {
       id: 'axis-map-verified',
-      ok: null,
-      detail: 'ตรวจแกน L/R ด้วย swing test ก่อนเก็บข้อมูล (ไม่ auto-verify ในโค้ด)',
+      ok: axisMapOk,
+      detail: axisMapOk === null
+        ? 'ยังไม่มี signed stride พอสำหรับ auto-check — ตรวจ swing test ด้วยมือ'
+        : (axisMapOk
+          ? 'strideLengthSigned ส่วนใหญ่เป็นบวก'
+          : 'strideLengthSigned ส่วนใหญ่ติดลบ — น่าจะ axis/ขั้วผิด'),
     },
   ];
 
   if (!validationPublishable) {
     warnings.unshift(
-      '⛔ validationPublishable=false — ห้ามใช้ error%/ICC จากรายงานนี้ในเปเปอร์หรือ ethics '
-      + 'จนกว่า lab checklist จะผ่าน (ดู report.labChecklist); ใช้ --lab เพื่อบังคับ fail ตอน CI/รันแลป',
+      '⛔ validationPublishable=false — ไม่มีข้างใดผ่าน agreement ที่ trusted '
+      + '(ดู sides[L|R].validationPublishable และ labChecklist); ใช้ --lab เพื่อบังคับ fail',
+    );
+  } else if (!validationPublishableBilateral && presentSides.length > 1) {
+    const bad = presentSides.filter((s) => !sides[s].validationPublishable);
+    warnings.unshift(
+      `⚠️ validationPublishable=true บางข้างเท่านั้น (ผ่าน: ${publishableSides.join(',')}; `
+      + `ไม่ผ่าน: ${bad.join(',')}) — อย่าเฉลี่ยข้ามข้างที่ไม่ publishable; `
+      + `validationPublishableBilateral=false`,
     );
   }
 
@@ -1380,6 +1424,7 @@ export function compareMocapToImu(mocap, imuTrace, options = {}) {
     imuSource: imu.source,
     warnings,
     validationPublishable,
+    validationPublishableBilateral,
     labChecklist,
     sides,
     session: {

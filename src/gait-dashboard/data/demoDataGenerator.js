@@ -21,6 +21,18 @@ const SAMPLE_RATE = 100;
 const ACCEL_SCALE = 4096;
 const GYRO_SCALE = 16.4;
 
+/** Mulberry32 — เล็ก deterministic; เทสต์ต้องส่ง seed เพื่อไม่ให้ CI flaky */
+export function createSeededRng(seed = 1) {
+  let state = (Number(seed) >>> 0) || 1;
+  return function next() {
+    state = (state + 0x6D2B79F5) >>> 0;
+    let t = state;
+    t = Math.imul(t ^ (t >>> 15), t | 1);
+    t ^= t + Math.imul(t ^ (t >>> 7), t | 61);
+    return ((t ^ (t >>> 14)) >>> 0) / 4294967296;
+  };
+}
+
 /**
  * Generate multiple strides of realistic walking data.
  *
@@ -30,6 +42,7 @@ const GYRO_SCALE = 16.4;
  * @param {number} options.peakAngVel   Peak angular velocity during swing (deg/s, default 350)
  * @param {number} options.hsAngVel     Heel strike angular velocity dip (deg/s, default -180)
  * @param {number} options.noiseLevel   Noise amplitude factor (default 1.0)
+ * @param {number} [options.seed]      ถ้าใส่ → PRNG คงที่ (เทสต์/CI); ไม่ใส่ → Math.random (demo UI)
  * @returns {{ samples: Object[], timestamps: number[], angVelDeg: number[] }}
  */
 export function generateWalkingData(options = {}) {
@@ -39,8 +52,10 @@ export function generateWalkingData(options = {}) {
   const hsAngVel = options.hsAngVel || -180;
   const noiseLevel = options.noiseLevel || 1.0;
   const stancePct = 0.62;
+  const rnd = Number.isFinite(options.seed)
+    ? createSeededRng(options.seed)
+    : Math.random;
 
-  const samplesPerStride = Math.round(strideTime * SAMPLE_RATE);
   const dt = 1.0 / SAMPLE_RATE;
 
   const samples = [];
@@ -48,7 +63,7 @@ export function generateWalkingData(options = {}) {
   const angVelDeg = [];
 
   for (let s = 0; s < numStrides; s++) {
-    const strideVariation = 1.0 + (Math.random() - 0.5) * 0.06;
+    const strideVariation = 1.0 + (rnd() - 0.5) * 0.06;
     const currentStrideTime = strideTime * strideVariation;
     const currentSamples = Math.round(currentStrideTime * SAMPLE_RATE);
 
@@ -56,9 +71,9 @@ export function generateWalkingData(options = {}) {
       const t = i / currentSamples;
       const globalTime = samples.length * dt;
 
-      const gxDeg = generateShankAngularVelocity(t, stancePct, peakAngVel, hsAngVel, noiseLevel);
+      const gxDeg = generateShankAngularVelocity(t, stancePct, peakAngVel, hsAngVel, noiseLevel, rnd);
       const shankAngle = generateShankAngle(t, stancePct);
-      const { ax, ay, az } = generateAccelerometer(t, shankAngle, stancePct, noiseLevel);
+      const { ax, ay, az } = generateAccelerometer(t, shankAngle, stancePct, noiseLevel, rnd);
 
       const sample = {
         seq: samples.length,
@@ -67,8 +82,8 @@ export function generateWalkingData(options = {}) {
         ay: Math.round(ay * ACCEL_SCALE),
         az: Math.round(az * ACCEL_SCALE),
         gx: Math.round(gxDeg * GYRO_SCALE),
-        gy: Math.round((Math.random() - 0.5) * 10 * noiseLevel * GYRO_SCALE),
-        gz: Math.round((Math.random() - 0.5) * 15 * noiseLevel * GYRO_SCALE),
+        gy: Math.round((rnd() - 0.5) * 10 * noiseLevel * GYRO_SCALE),
+        gz: Math.round((rnd() - 0.5) * 15 * noiseLevel * GYRO_SCALE),
       };
 
       samples.push(sample);
@@ -80,7 +95,7 @@ export function generateWalkingData(options = {}) {
   return { samples, timestamps, angVelDeg };
 }
 
-function generateShankAngularVelocity(t, stancePct, peak, hsDip, noise) {
+function generateShankAngularVelocity(t, stancePct, peak, hsDip, noise, rnd = Math.random) {
   let gx = 0;
 
   if (t < 0.05) {
@@ -107,7 +122,7 @@ function generateShankAngularVelocity(t, stancePct, peak, hsDip, noise) {
     }
   }
 
-  gx += (Math.random() - 0.5) * 8 * noise;
+  gx += (rnd() - 0.5) * 8 * noise;
   return gx;
 }
 
@@ -121,7 +136,7 @@ function generateShankAngle(t, stancePct) {
   return 20 - 35 * (1 - Math.cos(phase * Math.PI)) / 2;
 }
 
-function generateAccelerometer(t, shankAngle, stancePct, noise) {
+function generateAccelerometer(t, shankAngle, stancePct, noise, rnd = Math.random) {
   const thetaRad = shankAngle * Math.PI / 180;
 
   let ay = -Math.cos(thetaRad);
@@ -145,9 +160,9 @@ function generateAccelerometer(t, shankAngle, stancePct, noise) {
     az += 0.2 * Math.sin(swingPhase * Math.PI * 2);
   }
 
-  ax += (Math.random() - 0.5) * 0.05 * noise;
-  ay += (Math.random() - 0.5) * 0.04 * noise;
-  az += (Math.random() - 0.5) * 0.04 * noise;
+  ax += (rnd() - 0.5) * 0.05 * noise;
+  ay += (rnd() - 0.5) * 0.04 * noise;
+  az += (rnd() - 0.5) * 0.04 * noise;
 
   return { ax, ay, az };
 }
