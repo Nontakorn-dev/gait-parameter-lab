@@ -392,7 +392,7 @@ export function resampleUniform(t, y, dt, t0, t1) {
  * - maxLag ต้อง < ครึ่ง stride เพื่อเลี่ยง period aliasing
  * - parabolic interpolation รอบ discrete peak — ยังอาจเหลือ systematic bias ~+2–3ms
  *
- * @returns {{ lagS, peakCorr, peakCorrMinus, polarity, ok, ambiguous, rivalPeaks, reason, systematicUncertaintyS }}
+ * @returns {{ lagS, peakCorr, peakCorrMinus, polarity, ok, ambiguous, polarityIndeterminate, rivalPeaks, reason, systematicUncertaintyS }}
  */
 export function estimateSignalLagS(mocapT, mocapY, imuT, imuY, options = {}) {
   const maxLagS = options.maxLagS ?? DEFAULT_MAX_LAG_S;
@@ -406,6 +406,7 @@ export function estimateSignalLagS(mocapT, mocapY, imuT, imuY, options = {}) {
     polarity: 1,
     ok: false,
     ambiguous: false,
+    polarityIndeterminate: false,
     rivalPeaks: [],
     reason: 'missing-series',
     systematicUncertaintyS: SIGNAL_LAG_SYSTEMATIC_UNCERTAINTY_S,
@@ -481,6 +482,11 @@ export function estimateSignalLagS(mocapT, mocapY, imuT, imuY, options = {}) {
   // corr(ref, −sig) ที่ lag ใด = −corr(ref, sig) ที่ lag นั้น
   // → ความแรงของ best polarity−1 ในช่วง search = −minCorr
   const peakCorrMinus = Number.isFinite(minCorr) ? -minCorr : null;
+  // สัญญาณสมมาตร: peak(+)/peak(−) แยกไม่ได้ — ต้อง flag แม้ยังไม่ถือว่า mismatch
+  const polarityIndeterminate = Number.isFinite(peakCorrMinus)
+    && Number.isFinite(bestCorr)
+    && bestCorr >= minPeakCorr
+    && Math.abs(peakCorrMinus - bestCorr) <= polarityMargin;
 
   if (!(bestCorr > -Infinity)) {
     return { ...empty, reason: 'weak-correlation' };
@@ -495,18 +501,15 @@ export function estimateSignalLagS(mocapT, mocapY, imuT, imuY, options = {}) {
       polarity: 1,
       ok: false,
       ambiguous: false,
+      polarityIndeterminate: false,
       rivalPeaks: [],
       reason: 'polarity-mismatch',
       systematicUncertaintyS: SIGNAL_LAG_SYSTEMATIC_UNCERTAINTY_S,
     };
   }
 
-  // สอง polarity ใกล้กัน (สัญญาณสมมาตร / half-period) → เชื่อไม่ได้
-  if (
-    Number.isFinite(peakCorrMinus)
-    && Math.abs(peakCorrMinus - bestCorr) <= polarityMargin
-    && bestCorr >= minPeakCorr
-  ) {
+  // สอง polarity ใกล้กัน (sine / half-period / สัญญาณสมมาตร) → แยกขั้วไม่ได้
+  if (polarityIndeterminate) {
     return {
       lagS: null,
       peakCorr: bestCorr,
@@ -514,6 +517,7 @@ export function estimateSignalLagS(mocapT, mocapY, imuT, imuY, options = {}) {
       polarity: 1,
       ok: false,
       ambiguous: true,
+      polarityIndeterminate: true,
       rivalPeaks: [],
       reason: 'ambiguous-polarity',
       systematicUncertaintyS: SIGNAL_LAG_SYSTEMATIC_UNCERTAINTY_S,
@@ -528,6 +532,7 @@ export function estimateSignalLagS(mocapT, mocapY, imuT, imuY, options = {}) {
       polarity: 1,
       ok: false,
       ambiguous: false,
+      polarityIndeterminate: false,
       rivalPeaks: [],
       reason: 'weak-correlation',
       systematicUncertaintyS: SIGNAL_LAG_SYSTEMATIC_UNCERTAINTY_S,
@@ -565,6 +570,7 @@ export function estimateSignalLagS(mocapT, mocapY, imuT, imuY, options = {}) {
     polarity: 1,
     ok: !ambiguous,
     ambiguous,
+    polarityIndeterminate: false,
     rivalPeaks,
     reason: ambiguous ? 'ambiguous-period-peaks' : null,
     systematicUncertaintyS: SIGNAL_LAG_SYSTEMATIC_UNCERTAINTY_S,
@@ -866,6 +872,7 @@ export function compareMocapToImu(mocap, imuTrace, options = {}) {
         lagSource: alignment.lagSource,
         signalPeakCorr: signalLag?.ok ? signalLag.peakCorr : null,
         peakCorrMinus: signalLag?.peakCorrMinus ?? null,
+        polarityIndeterminate: signalLag?.polarityIndeterminate ?? false,
         systematicUncertaintyS: signalLag?.systematicUncertaintyS ?? null,
         pairedCount: alignment.pairs.length,
         unpairedMocap: alignment.unpairedMocap,
@@ -920,7 +927,7 @@ export function compareMocapToImu(mocap, imuTrace, options = {}) {
       'Stance% คนละนิยาม event ได้ (MoCap = ankle velocity quiet, IMU = gyro HS/TO)',
       'Align ลำดับ: signal xcorr (mocap ω × IMU gx) ก่อน แล้วค่อย HS-event lag สำหรับจับคู่ cycle',
       'HS timing residual ใช้ได้เฉพาะเมื่อ lagSource=signal-xcorr — ถ้า sync จาก HS events เอง bias ถูกดูดเข้า lag',
-      'Signal xcorr เทียบ peak(+1) กับ peak(−1) ในช่วง search: ถ้า −1 แรงกว่า = polarity-mismatch (ไม่ใช้ corr(lag=0) เพราะปนกับ lag จริง)',
+      'Signal xcorr เทียบ peak(+1) กับ peak(−1): −1 แรงกว่า = polarity-mismatch; |diff|≤margin = polarityIndeterminate (แยกขั้วไม่ได้)',
       'Signal lag มี systematic uncertainty ~±3ms จาก linear resample คนละ rate — ไม่ใช่ random ที่เฉลี่ยหาย',
       'sum(stride) ต่อข้าง ≠ ระยะเดินจริงแบบ 1:1 ถ้าสองข้างบันทึกพร้อมกัน (อย่าบวก L+R)',
     ],

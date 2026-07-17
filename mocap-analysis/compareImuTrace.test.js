@@ -371,6 +371,38 @@ test('🔴 estimateSignalLagS: กลับขั้ว+lag ไม่เงี�
   }
 });
 
+test('🟡 estimateSignalLagS: sine สมมาตร → polarityIndeterminate (แยกขั้วไม่ได้)', () => {
+  const dt = 0.005;
+  const n = 2000;
+  const t = Array.from({ length: n }, (_, i) => i * dt);
+  const y = t.map((x) => Math.sin(2 * Math.PI * x));
+  const lag = 0.05;
+  const shifted = t.map((tt) => Math.sin(2 * Math.PI * (tt - lag)));
+  const result = estimateSignalLagS(t, y, t, shifted, { maxLagS: 0.4, dtS: dt });
+  assert.equal(result.ok, false);
+  assert.equal(result.polarityIndeterminate, true);
+  assert.equal(result.reason, 'ambiguous-polarity');
+  assert.ok(Math.abs(result.peakCorr - result.peakCorrMinus) <= 0.05);
+});
+
+test('🟡 estimateSignalLagS: gait-like ไม่สมมาตร → polarityIndeterminate=false', () => {
+  const dt = 0.005;
+  const n = 2000;
+  const t = Array.from({ length: n }, (_, i) => i * dt);
+  const shape = (x) => {
+    const phase = ((x % 1.0) + 1.0) % 1.0;
+    if (phase < 0.08) return -180 * Math.sin(Math.PI * phase / 0.08);
+    if (phase < 0.55) return 0;
+    return 320 * Math.sin(Math.PI * (phase - 0.55) / 0.45);
+  };
+  const y = t.map(shape);
+  const shifted = t.map((tt) => shape(tt - 0.05));
+  const result = estimateSignalLagS(t, y, t, shifted, { maxLagS: 0.4, dtS: dt });
+  assert.equal(result.ok, true, result.reason);
+  assert.equal(result.polarityIndeterminate, false);
+  assert.ok(result.peakCorr - result.peakCorrMinus > 0.05);
+});
+
 test('🔴 estimateSignalLagS: ไม่ Math.min-spread crash กับ series ยาว 150k', () => {
   const n = 150_000;
   const t = new Float64Array(n);
@@ -379,8 +411,6 @@ test('🔴 estimateSignalLagS: ไม่ Math.min-spread crash กับ series 
     t[i] = i * 0.01;
     y[i] = Math.sin(i * 0.01);
   }
-  // overlap สั้น artificially ด้วย options — แค่ให้ถึง min/max path ก่อน resample
-  // (resample 150k@200Hz ทั้งช่วงจะช้าเกิน; ทดสอบว่าไม่ throw จาก spread)
   assert.doesNotThrow(() => {
     estimateSignalLagS(t, y, t, y, { maxLagS: 0.4, dtS: 0.02 });
   });
