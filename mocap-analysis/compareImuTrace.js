@@ -47,6 +47,16 @@ function median(values) {
   return finite.length % 2 === 0 ? (finite[mid - 1] + finite[mid]) / 2 : finite[mid];
 }
 
+/** @param {number[]} sortedAsc @param {number} p01 ใน [0,1] */
+function percentileSorted(sortedAsc, p01) {
+  if (!sortedAsc.length) return 0;
+  const idx = Math.min(
+    sortedAsc.length - 1,
+    Math.max(0, Math.round(p01 * (sortedAsc.length - 1))),
+  );
+  return sortedAsc[idx];
+}
+
 function pctError(imu, mocap) {
   if (!Number.isFinite(imu) || !Number.isFinite(mocap) || mocap === 0) return null;
   return ((imu - mocap) / Math.abs(mocap)) * 100;
@@ -385,16 +395,21 @@ export function resampleUniform(t, y, dt, t0, t1) {
  * จังหวะเริ่มเคลื่อนไหวจาก envelope |y| — ใช้เป็น coarse sync (ไม่เป็นคาบเหมือนก้าว)
  * ต้องมีช่วงนิ่งนำหน้า ไม่เช่นนั้นสัญญาณคาบตั้งแต่ต้นเฟรมจะให้ "onset" = phase ในก้าวแรก
  * ซึ่งเป็น alias ไม่ใช่ sync จริง
+ *
+ * ห้ามใช้ maxAbs×0.25 / maxAbs×0.15 เป็นคู่ threshold+gate — อัตราส่วน stance/swing
+ * ของ ω หน้าแข้งจริงอยู่ ~15–28% จึงคร่อมแบนด์นั้นพอดี (onset ไปตก swing แล้ว gate ปฏิเสธ)
  */
 export function estimateSignalOnsetS(t, y, options = {}) {
   if (!t?.length || t.length !== y?.length) return null;
   const abs = y.map((v) => (Number.isFinite(v) ? Math.abs(v) : 0));
-  let maxAbs = 0;
-  for (const v of abs) {
-    if (v > maxAbs) maxAbs = v;
-  }
+  const sorted = abs.slice().sort((a, b) => a - b);
+  const maxAbs = sorted[sorted.length - 1] ?? 0;
   if (!(maxAbs > 0)) return null;
-  const threshold = options.onsetThreshold ?? maxAbs * 0.25;
+
+  // noise floor จากทั้งซีรีส์ (ช่วงนิ่งดึง p05 ลง) — ไม่ผูกกับ swing peak
+  const noiseFloor = percentileSorted(sorted, 0.05);
+  const threshold = options.onsetThreshold ?? Math.max(noiseFloor * 5, noiseFloor + 12);
+
   const dts = [];
   for (let i = 1; i < t.length; i += 1) {
     const d = t[i] - t[i - 1];
@@ -404,6 +419,8 @@ export function estimateSignalOnsetS(t, y, options = {}) {
   const need = Math.max(3, Math.round((options.onsetSustainS ?? ONSET_SUSTAIN_S) / dtMed));
   const minQuietS = options.minLeadingQuietS ?? 0.4;
   const minQuietSamples = Math.max(5, Math.round(minQuietS / dtMed));
+  // gate เทียบกับ noise — ไม่ใช่ maxAbs×k (จะคร่อม stance ripple)
+  const quietLimit = options.leadingQuietMaxAbs ?? Math.max(noiseFloor * 8, noiseFloor + 20, threshold);
 
   let run = 0;
   for (let i = 0; i < abs.length; i += 1) {
@@ -411,13 +428,13 @@ export function estimateSignalOnsetS(t, y, options = {}) {
       run += 1;
       if (run >= need) {
         const onsetIdx = i - need + 1;
-        // ต้องนิ่งจริงตั้งแต่ต้น (max |y| ต่ำ) — stance ว่างในก้าวไม่นับเป็น quiet
-        if (onsetIdx < minQuietSamples) return null;
-        let leadMax = 0;
-        for (let q = 0; q < onsetIdx; q += 1) {
-          if (abs[q] > leadMax) leadMax = abs[q];
-        }
-        if (leadMax >= maxAbs * 0.15) return null;
+        // เว้น guard = need ก่อน onset — ไม่ให้ ramp ที่ไต่เข้า threshold ตัด gate ทิ้ง
+        const gateEnd = Math.max(0, onsetIdx - need);
+        if (gateEnd < minQuietSamples) return null;
+        const lead = abs.slice(0, gateEnd);
+        const leadSorted = lead.slice().sort((a, b) => a - b);
+        const leadP95 = percentileSorted(leadSorted, 0.95);
+        if (leadP95 >= quietLimit) return null;
         return Number.isFinite(t[onsetIdx]) ? t[onsetIdx] : null;
       }
     } else {
@@ -470,6 +487,7 @@ export function estimateSignalLagS(mocapT, mocapY, imuT, imuY, options = {}) {
     periodAliasRisk: false,
     rivalPeaks: [],
     coarseLagS: null,
+    coarseFromOnset: false,
     reason: 'missing-series',
     systematicUncertaintyS: SIGNAL_LAG_SYSTEMATIC_UNCERTAINTY_S,
   };
@@ -544,6 +562,7 @@ export function estimateSignalLagS(mocapT, mocapY, imuT, imuY, options = {}) {
       periodAliasRisk: false,
       rivalPeaks: [],
       coarseLagS: options.lagS,
+      coarseFromOnset: false,
       reason: Number.isFinite(corr) && corr >= minPeakCorr ? null : 'weak-correlation',
       systematicUncertaintyS: SIGNAL_LAG_SYSTEMATIC_UNCERTAINTY_S,
     };
@@ -566,9 +585,10 @@ export function estimateSignalLagS(mocapT, mocapY, imuT, imuY, options = {}) {
   const peaks = listLocalMaxima(corrByLag, minPeakCorr * 0.5);
   const strongPeaks = peaks.filter((p) => p.corr >= minPeakCorr);
 
-  // coarse lag จาก onset (ไม่เป็นคาบ) — หรือ override
+  // coarse lag จาก onset (ไม่เป็นคาบ) — หรือ override ชัดเจน (ไม่นับเป็น onset)
   let coarseLagS = Number.isFinite(options.coarseLagS) ? options.coarseLagS : null;
-  let coarseFromOnset = Number.isFinite(options.coarseLagS);
+  const hasExplicitCoarse = Number.isFinite(options.coarseLagS);
+  let coarseFromOnset = false;
   if (!Number.isFinite(coarseLagS)) {
     const mocapOnset = estimateSignalOnsetS(mocapT, mocapY, options);
     const imuOnset = estimateSignalOnsetS(imuT, imuY, options);
@@ -578,6 +598,7 @@ export function estimateSignalLagS(mocapT, mocapY, imuT, imuY, options = {}) {
     }
   }
   if (!Number.isFinite(coarseLagS)) coarseLagS = 0;
+  const trustedCoarse = hasExplicitCoarse || coarseFromOnset;
 
   const fineSamples = Math.floor(fineMaxLagS / dt);
   const coarseSamples = Math.round(coarseLagS / dt);
@@ -671,24 +692,30 @@ export function estimateSignalLagS(mocapT, mocapY, imuT, imuY, options = {}) {
 
   const lagS = (bestLagSamples + frac) * dt;
   const farFromCoarse = Math.abs(lagS - coarseLagS) > fineMaxLagS + 0.05;
-  // ถ้าไม่มี onset/heel-tap แล้วยังมี rival ±n·stride → ห้ามเลือก alias ใกล้ 0 แบบเงียบ
-  const refuseForAlias = periodAliasRisk && !coarseFromOnset;
+  // ถ้าไม่มี onset / explicit coarse / --lag แล้วยังมี rival ±n·stride → ห้ามเลือก alias ใกล้ 0 แบบเงียบ
+  const refuseForAlias = periodAliasRisk && !trustedCoarse;
+  const ok = !farFromCoarse && !refuseForAlias;
+  // reason = สาเหตุที่ปฏิเสธเท่านั้น; ข้อสังเกตอยู่ที่ periodAliasRisk / ambiguous
+  let reason = null;
+  if (!ok) {
+    if (farFromCoarse) reason = 'lag-far-from-coarse-onset';
+    else if (refuseForAlias) reason = 'period-alias-rivals';
+    else if (ambiguous) reason = 'ambiguous-period-peaks';
+  }
 
   return {
     lagS,
     peakCorr: bestCorr,
     peakCorrMinus,
     polarity: 1,
-    ok: !farFromCoarse && !refuseForAlias,
+    ok,
     ambiguous,
     polarityIndeterminate: false,
     periodAliasRisk,
     rivalPeaks,
     coarseLagS,
     coarseFromOnset,
-    reason: farFromCoarse
-      ? 'lag-far-from-coarse-onset'
-      : (refuseForAlias ? 'period-alias-rivals' : (periodAliasRisk ? 'period-alias-rivals' : (ambiguous ? 'ambiguous-period-peaks' : null))),
+    reason,
     systematicUncertaintyS: SIGNAL_LAG_SYSTEMATIC_UNCERTAINTY_S,
   };
 }

@@ -12,6 +12,7 @@ import {
   pairCyclesByTime,
   estimateHsTimeLagS,
   estimateSignalLagS,
+  estimateSignalOnsetS,
 } from './compareImuTrace.js';
 
 function buildDemoTrace({ numStrides = 8, side = 'R', boardEpochMs = 5000 } = {}) {
@@ -258,6 +259,58 @@ function gaitLike(t, stride = 1.1) {
   if (phase < 0.55) return 0;
   return 320 * Math.sin((Math.PI * (phase - 0.55)) / 0.45);
 }
+
+/** gait จริงขึ้น: stance ripple ~86 dps / swing ~350 — คร่อม maxAbs×0.15/0.25 พอดี */
+function gaitLikeRealistic(t, stride = 1.1, { swingPeak = 350, stancePeak = 86 } = {}) {
+  const phase = (((t % stride) + stride) % stride) / stride;
+  if (phase < 0.08) return -180 * Math.sin((Math.PI * phase) / 0.08);
+  if (phase < 0.55) {
+    const p = (phase - 0.08) / 0.47;
+    return stancePeak * Math.sin(Math.PI * p);
+  }
+  return swingPeak * Math.sin((Math.PI * (phase - 0.55)) / 0.45);
+}
+
+function withLeadingQuiet(walkFn, quietUntilS) {
+  return (t) => (t < quietUntilS ? 1.5 * Math.sin(2 * Math.PI * t * 2.3) : walkFn(t - quietUntilS));
+}
+
+test('🔴 estimateSignalOnsetS: leading quiet + stance ripple → ยิงใกล้ walk start', () => {
+  const dt = 0.005;
+  const quietUntil = 2.0;
+  const n = Math.round(8 / dt);
+  const t = Array.from({ length: n }, (_, i) => i * dt);
+  const y = t.map(withLeadingQuiet((tau) => gaitLikeRealistic(tau, 1.1), quietUntil));
+  const onset = estimateSignalOnsetS(t, y);
+  assert.ok(Number.isFinite(onset), 'ต้องหา onset ได้ — ไม่ใช่ null จาก gate ขัด threshold');
+  assert.ok(Math.abs(onset - quietUntil) < 0.25, `onset=${onset} ควรใกล้ walkStart=${quietUntil}`);
+});
+
+test('🔴 estimateSignalOnsetS: ไม่มี leading quiet → null (ไม่หลอก phase ในก้าวแรก)', () => {
+  const dt = 0.005;
+  const n = Math.round(6 / dt);
+  const t = Array.from({ length: n }, (_, i) => i * dt);
+  const y = t.map((tt) => gaitLikeRealistic(tt, 1.1));
+  assert.equal(estimateSignalOnsetS(t, y), null);
+});
+
+test('🔴 estimateSignalLagS: leading quiet → coarseFromOnset เองได้ ไม่ต้องฉีด coarseLagS', () => {
+  const dt = 0.005;
+  const quietUntil = 2.0;
+  const n = Math.round(12 / dt);
+  const t = Array.from({ length: n }, (_, i) => i * dt);
+  const walk = (tau) => gaitLikeRealistic(tau, 1.1);
+  const y = t.map(withLeadingQuiet(walk, quietUntil));
+  for (const lag of [0.10, 0.55, 1.20, 2.00]) {
+    // IMU = mocap เลื่อน — quiet ของ IMU ยาวกว่าตาม lag
+    const s = t.map((tt) => (tt < quietUntil + lag ? 1.5 * Math.sin(2 * Math.PI * tt * 2.3) : walk(tt - quietUntil - lag)));
+    const result = estimateSignalLagS(t, y, t, s, { dtS: dt, rivalScanMaxLagS: 5 });
+    assert.equal(result.coarseFromOnset, true, `lag=${lag} ต้องได้ coarse จาก onset ไม่ใช่ฉีด`);
+    assert.equal(result.ok, true, `lag=${lag} ok reason=${result.reason}`);
+    assert.ok(Math.abs(result.lagS - lag) < 0.03, `lag=${lag} ได้ ${result.lagS}`);
+    assert.equal(result.reason, null, `ok=true ต้อง reason=null ไม่ใช่ period-alias-rivals ได้ ${result.reason}`);
+  }
+});
 
 test('🔴 estimateSignalLagS: หา lag จากสัญญาณ + residual HS สะท้อน detector bias', () => {
   const dt = 0.005;
