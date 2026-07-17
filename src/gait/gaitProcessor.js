@@ -550,11 +550,16 @@ export class GaitProcessor {
       integrationWindows.push(integrationWindow);
 
       let peakAngle = -Infinity;
-      for (let j = metricStartIdx; j <= metricEndIdx && j < sampleCount; j += 1) {
-        peakAngle = Math.max(peakAngle, shankAngle[j]);
+      // peak มุม: เต็มช่วง HS→HS เหมือน MoCap — ห้ามใช้แค่ integration window
+      // (integration เริ่มหลัง quiet หลัง HS → แคบกว่า → IMU peak ≤ MoCap เชิงระบบ)
+      const peakStartIdx = cycle.hsStart.index;
+      const peakEndIdx = cycle.hsEnd.index;
+      for (let j = peakStartIdx; j <= peakEndIdx && j < sampleCount; j += 1) {
+        if (Number.isFinite(shankAngle[j])) peakAngle = Math.max(peakAngle, shankAngle[j]);
       }
       peakAngles.push(peakAngle);
 
+      // integration / clearance ยังใช้ quiet-bounded window ตามเดิม
       const cycleAy = [];
       const cycleAz = [];
       const cycleAngles = [];
@@ -590,7 +595,7 @@ export class GaitProcessor {
         STRIDE_LENGTH_MIN_M,
         Math.min(STRIDE_LENGTH_MAX_M, integratedStrideLength),
       );
-      const stepLength = strideLength / 2;
+      const stepLength = strideLength / 2; // สมมติสมมาตร L/R — ไม่ใช้กับ stroke asymmetry (ดู bilateral HS)
       // flag เมื่อค่าถูก clamp (ชนเพดาน/พื้น) เพื่อไม่ให้ปนกับค่าวัดจริงตอนทำ ICC/Bland-Altman
       const strideClamped = integratedStrideLength < STRIDE_LENGTH_MIN_M
         || integratedStrideLength > STRIDE_LENGTH_MAX_M;
@@ -700,7 +705,7 @@ export class GaitProcessor {
       ? strideLengthLast / strideTimeLast
       : 0;
     const doubleSupportPct = Number.isFinite(stancePctLast)
-      ? Math.max(0, 2 * stancePctLast - 100)
+      ? Math.max(0, 2 * stancePctLast - 100) // สมมติสมมาตร L/R — ไม่ใช่ double-support จริงจาก HS/TO สองข้าง
       : null;
     const doubleSupport = Number.isFinite(doubleSupportPct)
       ? strideTimeLast * doubleSupportPct / 100

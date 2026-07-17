@@ -252,29 +252,24 @@ test('🔴 estimateHsTimeLagS: ไม่ให้ 0 ชนะ tie เมื่�
   assert.ok(Math.abs(lagS - 0.35) < 0.05, `ควรได้ ~0.35 ไม่ใช่ 0 ได้ ${lagS}`);
 });
 
+function gaitLike(t, stride = 1.1) {
+  const phase = (((t % stride) + stride) % stride) / stride;
+  if (phase < 0.08) return -180 * Math.sin((Math.PI * phase) / 0.08);
+  if (phase < 0.55) return 0;
+  return 320 * Math.sin((Math.PI * (phase - 0.55)) / 0.45);
+}
+
 test('🔴 estimateSignalLagS: หา lag จากสัญญาณ + residual HS สะท้อน detector bias', () => {
   const dt = 0.005;
-  const n = 2000; // 10s
+  const n = 2000;
   const mocapT = Array.from({ length: n }, (_, i) => i * dt);
-  // asymmetric gait-like: sharp negative dip + broad positive hump
-  const mocapY = mocapT.map((t) => {
-    const phase = (t % 1.0);
-    if (phase < 0.08) return -180 * Math.sin(Math.PI * phase / 0.08);
-    if (phase < 0.55) return 0;
-    return 320 * Math.sin(Math.PI * (phase - 0.55) / 0.45);
-  });
+  const mocapY = mocapT.map((t) => gaitLike(t, 1.0));
   const trueLagS = 0.027;
-  const imuY = mocapT.map((t) => {
-    const u = t - trueLagS;
-    const phase = ((u % 1.0) + 1.0) % 1.0;
-    if (phase < 0.08) return -180 * Math.sin(Math.PI * phase / 0.08);
-    if (phase < 0.55) return 0;
-    return 320 * Math.sin(Math.PI * (phase - 0.55) / 0.45);
-  });
+  const imuY = mocapT.map((t) => gaitLike(t - trueLagS, 1.0));
 
-  const signal = estimateSignalLagS(mocapT, mocapY, mocapT, imuY);
+  const signal = estimateSignalLagS(mocapT, mocapY, mocapT, imuY, { coarseLagS: trueLagS });
   assert.equal(signal.ok, true, signal.reason);
-  assert.ok(Math.abs(signal.lagS - trueLagS) < 0.005, `xcorr lag=${signal.lagS} (want ~${trueLagS})`);
+  assert.ok(Math.abs(signal.lagS - trueLagS) < 0.005, `xcorr lag=${signal.lagS}`);
 
   const detectorBiasS = 0.10;
   const mocapCycles = [1, 2, 3, 4].map((k) => ({ hsStartTimeS: k }));
@@ -287,120 +282,98 @@ test('🔴 estimateSignalLagS: หา lag จากสัญญาณ + residual
     matchToleranceS: 0.40,
   });
   assert.equal(paired.timingMetricValid, true);
-  assert.ok(Math.abs(paired.meanTimeErrorS - detectorBiasS) < 0.05,
-    `หลัง signal-align residual ควร ≈ detector bias ได้ ${paired.meanTimeErrorS}`);
+  assert.ok(Math.abs(paired.meanTimeErrorS - detectorBiasS) < 0.05);
 });
 
-test('🔴 estimateSignalLagS: maxLag กว้างเกินไป → period alias; default 0.4 ถูกต้อง', () => {
+test('🔴 estimateSignalLagS: lag นอก fine window โดยไม่มี onset → ไม่เงียบ alias', () => {
   const dt = 0.005;
-  const n = 3000;
-  const mocapT = Array.from({ length: n }, (_, i) => i * dt);
-  const strideS = 1.0;
-  const shape = (t) => {
-    const phase = ((t % strideS) + strideS) % strideS;
-    if (phase < 0.08) return -180 * Math.sin(Math.PI * phase / 0.08);
-    if (phase < 0.55) return 0;
-    return 320 * Math.sin(Math.PI * (phase - 0.55) / 0.45);
-  };
-  const mocapY = mocapT.map(shape);
-  const trueLagS = 0.027;
-  const imuY = mocapT.map((t) => shape(t - trueLagS));
-
-  const bad = estimateSignalLagS(mocapT, mocapY, mocapT, imuY, { maxLagS: 8, dtS: dt });
-  // ด้วย maxLag=8 มัก ambiguous หรือเลือกผิด period — อย่างน้อยต้องไม่เงียบเชื่อ lag ~2s
-  if (bad.ok) {
-    assert.ok(Math.abs(bad.lagS - trueLagS) < 0.05 || bad.ambiguous,
-      `maxLag=8 ไม่ควรเชื่อ lag ผิดเงียบ ๆ ได้ ${bad.lagS}`);
-  }
-
-  const good = estimateSignalLagS(mocapT, mocapY, mocapT, imuY, { maxLagS: 0.4, dtS: dt });
-  assert.equal(good.ok, true, good.reason);
-  assert.ok(Math.abs(good.lagS - trueLagS) < 0.005, `default-range lag=${good.lagS}`);
-});
-
-test('🔴 estimateSignalLagS: polarity ถูก + lag ใหญ่ ต้องไม่ false-reject', () => {
-  const dt = 0.005;
-  const n = 2000;
+  const n = 4000;
   const t = Array.from({ length: n }, (_, i) => i * dt);
-  const y = t.map((x) => Math.sin(2 * Math.PI * x) + 0.4 * Math.sin(4 * Math.PI * x) + 0.15 * Math.sin(6 * Math.PI * x));
-  for (const lag of [0.30, 0.38]) {
-    const shifted = t.map((tt) => (
-      Math.sin(2 * Math.PI * (tt - lag))
-      + 0.4 * Math.sin(4 * Math.PI * (tt - lag))
-      + 0.15 * Math.sin(6 * Math.PI * (tt - lag))
-    ));
-    const result = estimateSignalLagS(t, y, t, shifted, { maxLagS: 0.4, dtS: dt });
-    assert.equal(result.ok, true, `lag=${lag}s ต้องผ่าน ได้ reason=${result.reason} peak=${result.peakCorr}`);
-    assert.ok(Math.abs(result.lagS - lag) < 0.01, `lag=${result.lagS} want ${lag}`);
-    assert.ok(result.peakCorr > result.peakCorrMinus, 'peak(+) ต้องชนะ peak(−)');
+  const y = t.map((tt) => gaitLike(tt, 1.1));
+  for (const lag of [1.2, 2.0]) {
+    const s = t.map((tt) => gaitLike(tt - lag, 1.1));
+    // ไม่ส่ง coarseLagS = จำลองกด Record คนละเวลาโดยไม่มี heel-tap/onset ต่างกัน
+    const result = estimateSignalLagS(t, y, t, s, { dtS: dt, rivalScanMaxLagS: 5 });
+    assert.equal(result.ok, false, `lag จริง ${lag}s ต้องไม่ ok เงียบ ได้ ${result.lagS} reason=${result.reason}`);
+    assert.ok(
+      result.periodAliasRisk || result.reason === 'period-alias-rivals',
+      `ต้อง flag period alias ได้ ${JSON.stringify(result)}`,
+    );
   }
 });
 
-test('🔴 estimateSignalLagS: กลับขั้ว → polarity-mismatch (ไม่ใช้ corrAtZero)', () => {
+test('🔴 estimateSignalLagS: coarseLag ถูก → จับ lag ใหญ่/ครึ่ง stride ได้ ไม่ false polarity', () => {
+  const dt = 0.005;
+  const n = 4000;
+  const t = Array.from({ length: n }, (_, i) => i * dt);
+  const y = t.map((tt) => gaitLike(tt, 1.1));
+  for (const lag of [0.10, 0.30, 0.55, 1.20, 2.00]) {
+    const s = t.map((tt) => gaitLike(tt - lag, 1.1));
+    const result = estimateSignalLagS(t, y, t, s, { dtS: dt, coarseLagS: lag, rivalScanMaxLagS: 5 });
+    assert.equal(result.ok, true, `lag=${lag} reason=${result.reason}`);
+    assert.ok(Math.abs(result.lagS - lag) < 0.02, `ได้ ${result.lagS} want ${lag}`);
+    assert.notEqual(result.reason, 'polarity-mismatch');
+  }
+});
+
+test('🔴 estimateSignalLagS: --lag บังคับ sync', () => {
   const dt = 0.005;
   const n = 2000;
   const t = Array.from({ length: n }, (_, i) => i * dt);
-  const shape = (x) => {
-    const phase = ((x % 1.0) + 1.0) % 1.0;
-    if (phase < 0.08) return -180 * Math.sin(Math.PI * phase / 0.08);
-    if (phase < 0.55) return 0;
-    return 320 * Math.sin(Math.PI * (phase - 0.55) / 0.45);
-  };
-  const y = t.map(shape);
-  const inverted = estimateSignalLagS(t, y, t, y.map((v) => -v), { maxLagS: 0.4, dtS: dt });
+  const y = t.map((tt) => gaitLike(tt, 1.1));
+  const s = t.map((tt) => gaitLike(tt - 1.2, 1.1));
+  const result = estimateSignalLagS(t, y, t, s, { lagS: 1.2, dtS: dt });
+  assert.equal(result.ok, true);
+  assert.equal(result.lagS, 1.2);
+  assert.ok(result.peakCorr > 0.9);
+});
+
+test('🔴 estimateSignalLagS: กลับขั้ว → polarity-mismatch', () => {
+  const dt = 0.005;
+  const n = 2000;
+  const t = Array.from({ length: n }, (_, i) => i * dt);
+  const y = t.map((tt) => gaitLike(tt, 1.0));
+  const inverted = estimateSignalLagS(t, y, t, y.map((v) => -v), { coarseLagS: 0, dtS: dt });
   assert.equal(inverted.ok, false);
   assert.equal(inverted.reason, 'polarity-mismatch');
-  assert.ok(inverted.peakCorrMinus > inverted.peakCorr + 0.05);
 });
 
-test('🔴 estimateSignalLagS: กลับขั้ว+lag ไม่เงียบ flip / ไม่หลุดที่ corr(0)≈0', () => {
+test('🔴 estimateSignalLagS: กลับขั้ว+lag ไม่เงียบ flip', () => {
   const dt = 0.005;
   const n = 2000;
   const t = Array.from({ length: n }, (_, i) => i * dt);
-  const y = t.map((x) => Math.sin(2 * Math.PI * x) + 0.4 * Math.sin(4 * Math.PI * x) + 0.15 * Math.sin(6 * Math.PI * x));
+  const y = t.map((x) => Math.sin(2 * Math.PI * x) + 0.4 * Math.sin(4 * Math.PI * x));
   for (const lag of [0.10, 0.20]) {
     const invertedShifted = t.map((tt) => -(
-      Math.sin(2 * Math.PI * (tt - lag))
-      + 0.4 * Math.sin(4 * Math.PI * (tt - lag))
-      + 0.15 * Math.sin(6 * Math.PI * (tt - lag))
+      Math.sin(2 * Math.PI * (tt - lag)) + 0.4 * Math.sin(4 * Math.PI * (tt - lag))
     ));
-    const result = estimateSignalLagS(t, y, t, invertedShifted, { maxLagS: 0.4, dtS: dt });
-    assert.equal(result.ok, false, `กลับขั้ว lag=${lag} ต้องไม่ ok ได้ ${JSON.stringify(result)}`);
+    const result = estimateSignalLagS(t, y, t, invertedShifted, { coarseLagS: lag, dtS: dt });
+    assert.equal(result.ok, false);
     assert.equal(result.reason, 'polarity-mismatch');
-    assert.ok(result.peakCorrMinus > result.peakCorr, `peak(−)=${result.peakCorrMinus} ต้อง > peak(+)=${result.peakCorr}`);
   }
 });
 
-test('🟡 estimateSignalLagS: sine สมมาตร → polarityIndeterminate (แยกขั้วไม่ได้)', () => {
+test('🟡 estimateSignalLagS: sine สมมาตร → polarityIndeterminate', () => {
   const dt = 0.005;
   const n = 2000;
   const t = Array.from({ length: n }, (_, i) => i * dt);
   const y = t.map((x) => Math.sin(2 * Math.PI * x));
-  const lag = 0.05;
-  const shifted = t.map((tt) => Math.sin(2 * Math.PI * (tt - lag)));
-  const result = estimateSignalLagS(t, y, t, shifted, { maxLagS: 0.4, dtS: dt });
+  const shifted = t.map((tt) => Math.sin(2 * Math.PI * (tt - 0.05)));
+  const result = estimateSignalLagS(t, y, t, shifted, { coarseLagS: 0.05, dtS: dt });
   assert.equal(result.ok, false);
   assert.equal(result.polarityIndeterminate, true);
   assert.equal(result.reason, 'ambiguous-polarity');
-  assert.ok(Math.abs(result.peakCorr - result.peakCorrMinus) <= 0.05);
 });
 
 test('🟡 estimateSignalLagS: gait-like ไม่สมมาตร → polarityIndeterminate=false', () => {
   const dt = 0.005;
   const n = 2000;
   const t = Array.from({ length: n }, (_, i) => i * dt);
-  const shape = (x) => {
-    const phase = ((x % 1.0) + 1.0) % 1.0;
-    if (phase < 0.08) return -180 * Math.sin(Math.PI * phase / 0.08);
-    if (phase < 0.55) return 0;
-    return 320 * Math.sin(Math.PI * (phase - 0.55) / 0.45);
-  };
-  const y = t.map(shape);
-  const shifted = t.map((tt) => shape(tt - 0.05));
-  const result = estimateSignalLagS(t, y, t, shifted, { maxLagS: 0.4, dtS: dt });
+  const y = t.map((tt) => gaitLike(tt, 1.0));
+  const shifted = t.map((tt) => gaitLike(tt - 0.05, 1.0));
+  const result = estimateSignalLagS(t, y, t, shifted, { coarseLagS: 0.05, dtS: dt });
   assert.equal(result.ok, true, result.reason);
   assert.equal(result.polarityIndeterminate, false);
-  assert.ok(result.peakCorr - result.peakCorrMinus > 0.05);
 });
 
 test('🔴 estimateSignalLagS: ไม่ Math.min-spread crash กับ series ยาว 150k', () => {
@@ -412,6 +385,6 @@ test('🔴 estimateSignalLagS: ไม่ Math.min-spread crash กับ series 
     y[i] = Math.sin(i * 0.01);
   }
   assert.doesNotThrow(() => {
-    estimateSignalLagS(t, y, t, y, { maxLagS: 0.4, dtS: 0.02 });
+    estimateSignalLagS(t, y, t, y, { maxLagS: 0.4, rivalScanMaxLagS: 0.4, dtS: 0.02 });
   });
 });

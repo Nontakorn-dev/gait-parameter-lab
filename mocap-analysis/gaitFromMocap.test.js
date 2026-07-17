@@ -85,13 +85,14 @@ test('end-to-end: parse CSV จริง -> resolve role จากชื่อ -
       `${side} meanCadenceSpm=${mean} ควรใกล้ ${FIXTURE.EXPECTED_CADENCE_SPM.toFixed(1)}`);
   }
 
-  // --- stancePct ต้อง resolve ได้ทุก cycle และใกล้ ground truth (62%) — วิธีใหม่ไม่มี
-  // "unresolved" อีกแล้วเพราะไม่พึ่ง detector ที่ยืมมาจาก IMU ---
+  // --- stancePct: foot-velocity มี bias ~−3% vs synthetic GT (threshold+Butterworth)
+  // tolerance <3 คือ agreement กับ method ไม่ใช่ absolute GT accuracy ---
   for (const side of ['L', 'R']) {
     for (const cycle of result.perSide[side].cycles) {
       assert.ok(Number.isFinite(cycle.stancePct), `${side} stancePct ต้อง resolve ได้เสมอ`);
       assert.ok(Math.abs(cycle.stancePct - FIXTURE.STANCE_PCT * 100) < 3,
-        `${side} stancePct=${cycle.stancePct.toFixed(1)} ควรใกล้ ${(FIXTURE.STANCE_PCT * 100).toFixed(1)}`);
+        `${side} stancePct=${cycle.stancePct.toFixed(1)} agreement กับ foot-velocity `
+        + `(GT ${(FIXTURE.STANCE_PCT * 100).toFixed(1)}; bias method ~2–3%)`);
     }
   }
 

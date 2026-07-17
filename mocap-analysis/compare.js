@@ -2,19 +2,33 @@
 // เทียบ mocap.gait-params.json กับ IMU trace ที่ export จาก dashboard
 //
 // วิธีใช้:
-//   node mocap-analysis/compare.js <mocap.gait-params.json> <imu-trace.json> [--out report.json]
+//   node mocap-analysis/compare.js <mocap.gait-params.json> <imu-trace.json> [options]
 //
-// ตัวอย่าง:
-//   node mocap-analysis/compare.js mocap.gait-params.json ~/Downloads/gait-trace-....json
+// Options:
+//   --out <report.json>
+//   --lag <seconds>          บังคับ sync lag (IMU−MoCap) เช่นจาก heel-tap
+//   --fine-lag <seconds>     หน้าต่างละเอียดรอบ coarse (default 0.4)
+//   --rival-scan <seconds>   สแกนหา period-alias rivals (default 5)
+//   --max-lag <seconds>      alias ของ --fine-lag (backward compatible)
 
 import { readFileSync, writeFileSync } from 'node:fs';
 import { compareMocapToImu } from './compareImuTrace.js';
 
 function parseArgs(argv) {
-  const args = { mocap: null, imu: null, out: null };
+  const args = {
+    mocap: null,
+    imu: null,
+    out: null,
+    lag: null,
+    fineLag: null,
+    rivalScan: null,
+  };
   for (let i = 0; i < argv.length; i += 1) {
     const a = argv[i];
     if (a === '--out') { args.out = argv[++i]; continue; }
+    if (a === '--lag') { args.lag = Number(argv[++i]); continue; }
+    if (a === '--fine-lag' || a === '--max-lag') { args.fineLag = Number(argv[++i]); continue; }
+    if (a === '--rival-scan') { args.rivalScan = Number(argv[++i]); continue; }
     if (!args.mocap && !a.startsWith('--')) { args.mocap = a; continue; }
     if (!args.imu && !a.startsWith('--')) { args.imu = a; continue; }
   }
@@ -39,6 +53,15 @@ function printSide(side, block) {
     return;
   }
 
+  const align = block.alignment;
+  if (align) {
+    console.log(
+      `  align: ${align.mode}  lag=${fmt(align.lagS, 3)}s  source=${align.lagSource || '—'}`
+      + (align.periodAliasRisk ? '  ⚠️ period-alias' : '')
+      + (align.timingMetricValid ? '' : '  (HS timing n/a)'),
+    );
+  }
+
   console.log(
     `  cycles: MoCap=${block.mocap.cycleCount}  IMU=${block.imu.cycleCount}`
     + (block.cycleCountDelta ? `  (Δ ${block.cycleCountDelta >= 0 ? '+' : ''}${block.cycleCountDelta})` : ''),
@@ -60,7 +83,10 @@ function printSide(side, block) {
 function main() {
   const args = parseArgs(process.argv.slice(2));
   if (!args.mocap || !args.imu) {
-    console.error('ใช้: node mocap-analysis/compare.js <mocap.gait-params.json> <imu-trace.json> [--out report.json]');
+    console.error(
+      'ใช้: node mocap-analysis/compare.js <mocap.gait-params.json> <imu-trace.json>\n'
+      + '     [--out report.json] [--lag SEC] [--fine-lag SEC] [--rival-scan SEC]',
+    );
     process.exit(1);
   }
 
@@ -70,7 +96,15 @@ function main() {
   console.log(`MoCap: ${args.mocap}`);
   console.log(`IMU:   ${args.imu}`);
 
-  const report = compareMocapToImu(mocap, imu);
+  const align = {};
+  if (Number.isFinite(args.lag)) align.lagS = args.lag;
+  if (Number.isFinite(args.fineLag)) {
+    align.fineMaxLagS = args.fineLag;
+    align.maxLagS = args.fineLag;
+  }
+  if (Number.isFinite(args.rivalScan)) align.rivalScanMaxLagS = args.rivalScan;
+
+  const report = compareMocapToImu(mocap, imu, { align });
 
   if (!report.ok) {
     console.error(`\nเทียบไม่ได้: ${report.error}`);
@@ -78,35 +112,14 @@ function main() {
     process.exit(1);
   }
 
-  console.log(`\nแหล่ง IMU metrics: ${report.imuSource}`);
-  if (report.warnings.length) {
-    console.log('\nคำเตือน:');
-    for (const w of report.warnings) console.log(`  ⚠️ ${w}`);
-  }
-
+  for (const w of report.warnings || []) console.warn(`⚠️  ${w}`);
   printSide('L', report.sides.L);
   printSide('R', report.sides.R);
 
-  console.log('\n=== Session / ระยะ ===');
-  console.log(`  MoCap pelvis net forward: ${fmt(report.session.mocapPelvisNetForwardM)} m`);
-  console.log(`  MoCap bilateral cadence:  ${fmt(report.session.mocapTrueCadenceSpm, 1)} spm`);
-  console.log(`  IMU groundTruth.distance: ${fmt(report.session.imuGroundTruthDistanceM)} m`);
-  for (const side of ['L', 'R']) {
-    const d = report.session.distanceBySide[side];
-    if (!Number.isFinite(d.imuSumStrideLengthM)) continue;
-    console.log(
-      `  IMU ${side} sum(stride): ${fmt(d.imuSumStrideLengthM)} m`
-      + `  vs MoCap net ${fmtPct(d.vsMocapPelvisNetPct)}`
-      + `  vs GT ${fmtPct(d.vsGroundTruthPct)}`,
-    );
+  if (args.out) {
+    writeFileSync(args.out, `${JSON.stringify(report, null, 2)}\n`);
+    console.log(`\nเขียนรายงาน: ${args.out}`);
   }
-
-  console.log('\nหมายเหตุ:');
-  for (const n of report.notes) console.log(`  • ${n}`);
-
-  const outPath = args.out || args.imu.replace(/\.json$/i, '') + '.vs-mocap.json';
-  writeFileSync(outPath, JSON.stringify(report, null, 2));
-  console.log(`\nบันทึกรายงานเต็ม: ${outPath}`);
 }
 
 main();
