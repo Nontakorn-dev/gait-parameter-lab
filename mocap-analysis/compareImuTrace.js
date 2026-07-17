@@ -1330,22 +1330,6 @@ export function compareMocapToImu(mocap, imuTrace, options = {}) {
     && presentSides.every((s) => sides[s].validationPublishable)
     && !hasSyntheticTimestamps;
 
-  // สัญญาณ axis กลับ: strideLengthSigned ส่วนใหญ่ติดลบ
-  const signedStrides = presentSides.flatMap((s) => (imu.bySide[s] || [])
-    .map((c) => c.strideLengthSignedM)
-    .filter(Number.isFinite));
-  let axisMapOk = null;
-  if (signedStrides.length >= 3) {
-    const neg = signedStrides.filter((v) => v < 0).length;
-    axisMapOk = neg / signedStrides.length < 0.5;
-    if (!axisMapOk) {
-      warnings.push(
-        `axis-map: strideLengthSignedM ติดลบ ${neg}/${signedStrides.length} ก้าว `
-        + '— น่าจะแกน/ขั้วผิด; ตรวจ mount หรือ AXIS_MAP ก่อน validation',
-      );
-    }
-  }
-
   const labChecklist = [
     {
       id: 'heel-tap-or-lag',
@@ -1372,13 +1356,11 @@ export function compareMocapToImu(mocap, imuTrace, options = {}) {
       detail: 'เคลมได้เฉพาะ strideLength / cadence / walkingSpeed — stance% และ peak° เป็น exploratory',
     },
     {
+      // ห้ามใช้ strideLengthSigned เป็น auto-gate — บนข้อมูลจริง/demo ค่า signed
+      // ใกล้ 0 ได้จาก integration residual → ฟ้องเท็จ 100%; ใช้ swing test ใน LAB_VALIDATION.md
       id: 'axis-map-verified',
-      ok: axisMapOk,
-      detail: axisMapOk === null
-        ? 'ยังไม่มี signed stride พอสำหรับ auto-check — ตรวจ swing test ด้วยมือ'
-        : (axisMapOk
-          ? 'strideLengthSigned ส่วนใหญ่เป็นบวก'
-          : 'strideLengthSigned ส่วนใหญ่ติดลบ — น่าจะ axis/ขั้วผิด'),
+      ok: null,
+      detail: 'ตรวจแกน L/R ด้วย swing test (ดูขั้ว gx ตอนแกว่งไปหน้า) — ไม่ auto-verify จาก signed stride',
     },
   ];
 

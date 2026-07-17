@@ -103,6 +103,41 @@ test('clinical metadata: strideLengthSignedM และ zuptAccelDeviationG ม�
     'ต้องมี ZUPT-validity (‖accel‖ เบี่ยงจาก 1g ที่ปลาย window)');
 });
 
+test('demo double-integration: mean |stride| ~ targetStrideLengthM (ไม่ใช่ gravity-only ~0.15 m)', () => {
+  const target = 1.25;
+  const proc = new GaitProcessor();
+  const { samples } = generateWalkingData({
+    numStrides: 12,
+    strideTime: 1.05,
+    seed: 42,
+    noiseLevel: 0,
+    targetStrideLengthM: target,
+  });
+  const t0 = Date.now();
+  const lengths = [];
+  proc.onParams(({ newCycleDiagnostics }) => {
+    for (const d of newCycleDiagnostics || []) {
+      if (Number.isFinite(d.strideLengthM) && !d.strideLengthClamped) {
+        lengths.push(d.strideLengthM);
+      }
+    }
+  });
+  for (const s of samples) {
+    proc.addSample({ ...s, timestampMs: t0 + Math.round(s.timestamp * 1000) });
+  }
+  proc.analyze();
+  assert.ok(lengths.length >= 5, `ต้องมี cycle พอ ประเมินได้ ได้ ${lengths.length}`);
+  const mean = lengths.reduce((a, b) => a + b, 0) / lengths.length;
+  // กัน regression แบบ gravity-only (~0.15 m) และการ clamp เพดานทั้งชุด
+  assert.ok(mean > 0.8, `mean stride=${mean.toFixed(3)} m ต่ำผิดปกติ — น่าจะไม่มี aHoriz / angle พัง`);
+  assert.ok(mean < 1.7, `mean stride=${mean.toFixed(3)} m สูงผิดปกติ / ใกล้เพดาน clamp`);
+  assert.ok(
+    Math.abs(mean - target) / target < 0.25,
+    `mean=${mean.toFixed(3)} ควรใกล้ target ${target} m (±25%); ไม่ใช่สำเนา oracle`,
+  );
+  assert.ok(proc.latestParams.strideLengthSignedM > 0.5, 'ขั้วเดินหน้าควรเป็นบวกบน demo แกนถูก');
+});
+
 test('latestParams ไม่มี windowSource ซ้ำกับ integrationSource อีกต่อไป (ตัดชื่อซ้ำทิ้ง)', () => {
   const { params: p } = runPipeline();
   assert.equal('windowSource' in p, false, 'windowSource ต้องไม่อยู่ระดับบนของ latestParams แล้ว');

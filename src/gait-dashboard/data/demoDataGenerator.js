@@ -1,25 +1,28 @@
 /**
  * Demo Data Generator
  *
- * Generates realistic synthetic IMU data for shank-mounted sensor during walking.
- * Used when no real BLE sensor is connected.
+ * Synthetic shank IMU for walking when no BLE sensor is connected.
  *
  * Sensor orientation:
  *   X -> right (medio-lateral)
  *   Y -> down  (along shank)
  *   Z -> forward (anterior)
  *
- * Normal walking parameters (adult):
- *   - Stride time: ~1.0-1.3 s
- *   - Cadence: ~100-120 steps/min
- *   - Shank angular velocity peak: ~300-400 deg/s (swing)
- *   - Stance phase: ~60% of gait cycle
- *   - Swing phase: ~40% of gait cycle
+ * สำคัญ — ต้องครบพร้อมกัน:
+ * 1) gx มี HS dip (ลบ) + swing peak (บวก) + TO dip — event detector ทำงาน
+ * 2) gx ลบค่าเฉลี่ยต่อก้าว → ∫gx≈0, มุมปิดรอบ (ไม่ hard-reset ที่ขัดกับ Kalman)
+ * 3) aHoriz ใน world ช่วงต้น–กลาง swing ที่ integrate ผ่าน GaitProcessor
+ *    ได้ ~targetStrideLengthM (ของเก่ามีแค่ gravity → ได้ ~0.15 m)
  */
 
 const SAMPLE_RATE = 100;
 const ACCEL_SCALE = 4096;
 const GYRO_SCALE = 16.4;
+const G_MS2 = 9.81;
+const DEFAULT_TARGET_STRIDE_M = 1.25;
+const ANGLE_AT_HS_DEG = -15;
+/** จบ aHoriz ก่อนปลาย swing เพื่อให้ post-peak-valley อยู่ตอน ‖accel‖≈1g */
+const AHORIZ_ACTIVE_SWING_FRAC = 0.8;
 
 /** Mulberry32 — เล็ก deterministic; เทสต์ต้องส่ง seed เพื่อไม่ให้ CI flaky */
 export function createSeededRng(seed = 1) {
@@ -41,16 +44,20 @@ export function createSeededRng(seed = 1) {
  * @param {number} options.strideTime   Stride duration in seconds (default 1.1)
  * @param {number} options.peakAngVel   Peak angular velocity during swing (deg/s, default 350)
  * @param {number} options.hsAngVel     Heel strike angular velocity dip (deg/s, default -180)
- * @param {number} options.noiseLevel   Noise amplitude factor (default 1.0)
+ * @param {number} options.noiseLevel   Noise amplitude factor (default 1.0; ใช้ 0 ได้)
  * @param {number} [options.seed]      ถ้าใส่ → PRNG คงที่ (เทสต์/CI); ไม่ใส่ → Math.random (demo UI)
- * @returns {{ samples: Object[], timestamps: number[], angVelDeg: number[] }}
+ * @param {number} [options.targetStrideLengthM] ระยะก้าวเป้าหมายของ aHoriz (default 1.25)
+ * @returns {{ samples: Object[], timestamps: number[], angVelDeg: number[], targetStrideLengthM: number }}
  */
 export function generateWalkingData(options = {}) {
   const numStrides = options.numStrides || 8;
   const strideTime = options.strideTime || 1.1;
   const peakAngVel = options.peakAngVel || 350;
   const hsAngVel = options.hsAngVel || -180;
-  const noiseLevel = options.noiseLevel || 1.0;
+  const noiseLevel = Number.isFinite(options.noiseLevel) ? options.noiseLevel : 1.0;
+  const targetStrideLengthM = Number.isFinite(options.targetStrideLengthM)
+    ? options.targetStrideLengthM
+    : DEFAULT_TARGET_STRIDE_M;
   const stancePct = 0.62;
   const rnd = Number.isFinite(options.seed)
     ? createSeededRng(options.seed)
@@ -62,20 +69,41 @@ export function generateWalkingData(options = {}) {
   const timestamps = [];
   const angVelDeg = [];
 
-  for (let s = 0; s < numStrides; s++) {
+  for (let s = 0; s < numStrides; s += 1) {
     const strideVariation = 1.0 + (rnd() - 0.5) * 0.06;
     const currentStrideTime = strideTime * strideVariation;
     const currentSamples = Math.round(currentStrideTime * SAMPLE_RATE);
+    const swingDurationS = currentStrideTime * (1 - stancePct);
+    const sampleDtS = currentStrideTime / Math.max(1, currentSamples);
 
-    for (let i = 0; i < currentSamples; i++) {
+    const gxStride = [];
+    let gxSum = 0;
+    for (let i = 0; i < currentSamples; i += 1) {
+      const t = i / currentSamples;
+      const gx = generateShankAngularVelocity(
+        t, stancePct, peakAngVel, hsAngVel, noiseLevel, rnd,
+      );
+      gxStride.push(gx);
+      gxSum += gx;
+    }
+    // ปิดรอบมุมต่อก้าว — ไม่ hard-reset ที่ทำให้ accel/Kalman คนละเฟส
+    const gxMean = gxSum / currentSamples;
+    for (let i = 0; i < currentSamples; i += 1) {
+      gxStride[i] -= gxMean;
+    }
+
+    let shankAngle = ANGLE_AT_HS_DEG;
+    for (let i = 0; i < currentSamples; i += 1) {
       const t = i / currentSamples;
       const globalTime = samples.length * dt;
+      const gxDeg = gxStride[i];
 
-      const gxDeg = generateShankAngularVelocity(t, stancePct, peakAngVel, hsAngVel, noiseLevel, rnd);
-      const shankAngle = generateShankAngle(t, stancePct);
-      const { ax, ay, az } = generateAccelerometer(t, shankAngle, stancePct, noiseLevel, rnd);
+      const { ax, ay, az } = generateAccelerometer(t, shankAngle, stancePct, noiseLevel, rnd, {
+        targetStrideLengthM,
+        swingDurationS,
+      });
 
-      const sample = {
+      samples.push({
         seq: samples.length,
         timestamp: globalTime,
         ax: Math.round(ax * ACCEL_SCALE),
@@ -84,15 +112,15 @@ export function generateWalkingData(options = {}) {
         gx: Math.round(gxDeg * GYRO_SCALE),
         gy: Math.round((rnd() - 0.5) * 10 * noiseLevel * GYRO_SCALE),
         gz: Math.round((rnd() - 0.5) * 15 * noiseLevel * GYRO_SCALE),
-      };
-
-      samples.push(sample);
+      });
       timestamps.push(globalTime);
       angVelDeg.push(gxDeg);
+
+      shankAngle += gxDeg * sampleDtS;
     }
   }
 
-  return { samples, timestamps, angVelDeg };
+  return { samples, timestamps, angVelDeg, targetStrideLengthM };
 }
 
 function generateShankAngularVelocity(t, stancePct, peak, hsDip, noise, rnd = Math.random) {
@@ -110,8 +138,10 @@ function generateShankAngularVelocity(t, stancePct, peak, hsDip, noise, rnd = Ma
   } else if (t < stancePct) {
     const phase = (t - stancePct * 0.6) / (stancePct - stancePct * 0.6);
     gx = 60 - 80 * Math.sin(phase * Math.PI * 0.7);
-    if (phase > 0.3 && phase < 0.7) {
-      gx -= 40 * Math.exp(-Math.pow((phase - 0.5) / 0.1, 2));
+    // TO dip ให้ชัดพอ findLocalMinima (prominence ≥ 30)
+    if (phase > 0.25 && phase < 0.85) {
+      const u = (phase - 0.55) / 0.12;
+      gx -= 55 * Math.exp(-(u * u));
     }
   } else {
     const swingPhase = (t - stancePct) / (1.0 - stancePct);
@@ -126,38 +156,46 @@ function generateShankAngularVelocity(t, stancePct, peak, hsDip, noise, rnd = Ma
   return gx;
 }
 
-function generateShankAngle(t, stancePct) {
-  if (t < stancePct) {
-    const phase = t / stancePct;
-    return -15 + 35 * phase;
+/**
+ * Accel ในหน่วย g: gravity ตาม shankAngle + aHoriz โลกในช่วง swing
+ * aHoriz = A·sin(2π·sp) บนเศษส่วนต้นของ swing → v ขอบ ≈ 0 และ displacement ≈ target
+ */
+function generateAccelerometer(t, shankAngle, stancePct, noise, rnd = Math.random, opts = {}) {
+  const thetaRad = shankAngle * Math.PI / 180;
+  const c = Math.cos(thetaRad);
+  const s = Math.sin(thetaRad);
+
+  const targetS = opts.targetStrideLengthM ?? DEFAULT_TARGET_STRIDE_M;
+  const swingT = opts.swingDurationS ?? 0.4;
+  let aHorizMs2 = 0;
+  if (t >= stancePct && targetS > 0 && swingT > 0) {
+    const swingPhase = (t - stancePct) / (1.0 - stancePct);
+    if (swingPhase <= AHORIZ_ACTIVE_SWING_FRAC) {
+      const sp = swingPhase / AHORIZ_ACTIVE_SWING_FRAC;
+      const tEff = swingT * AHORIZ_ACTIVE_SWING_FRAC;
+      const A = (targetS * 2 * Math.PI) / (tEff * tEff);
+      aHorizMs2 = A * Math.sin(2 * Math.PI * sp);
+    }
   }
 
-  const phase = (t - stancePct) / (1.0 - stancePct);
-  return 20 - 35 * (1 - Math.cos(phase * Math.PI)) / 2;
-}
+  const aVertG = 1;
+  const aHorizG = aHorizMs2 / G_MS2;
 
-function generateAccelerometer(t, shankAngle, stancePct, noise, rnd = Math.random) {
-  const thetaRad = shankAngle * Math.PI / 180;
-
-  let ay = -Math.cos(thetaRad);
-  let az = -Math.sin(thetaRad);
+  // อินเวอร์สของ VelocityIntegrator.sensorToWorld
+  let ay = -aVertG * c - aHorizG * s;
+  let az = aHorizG * c - aVertG * s;
   let ax = 0;
 
-  if (t < 0.08) {
-    const impactPhase = t / 0.08;
-    const impact = 2.5 * Math.exp(-impactPhase * 5) * Math.sin(impactPhase * Math.PI * 8);
+  if (t < 0.05) {
+    const impactPhase = t / 0.05;
+    const impact = 0.2 * Math.exp(-impactPhase * 5) * Math.sin(impactPhase * Math.PI * 4);
     ay += impact;
-    az += impact * 0.4;
+    az += impact * 0.25;
   }
 
   if (t > stancePct - 0.05 && t < stancePct + 0.05) {
     const toPushPhase = (t - (stancePct - 0.05)) / 0.10;
-    ay += 0.3 * Math.sin(toPushPhase * Math.PI);
-  }
-
-  if (t > stancePct) {
-    const swingPhase = (t - stancePct) / (1.0 - stancePct);
-    az += 0.2 * Math.sin(swingPhase * Math.PI * 2);
+    ay += 0.1 * Math.sin(toPushPhase * Math.PI);
   }
 
   ax += (rnd() - 0.5) * 0.05 * noise;
