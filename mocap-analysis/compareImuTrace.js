@@ -27,11 +27,11 @@ const DEFAULT_MAX_LAG_S = 0.4;
 const DEFAULT_XCORR_DT_S = 0.005;
 const DEFAULT_MIN_PEAK_CORR = 0.5;
 const AMBIGUOUS_PEAK_RATIO = 0.95;
-// เช็ค polarity ที่ lag≈0 ก่อนเชื่อ peak ที่อื่น — สัญญาณกลับขั้วมักมี sidelobe บวก (~0.6)
-// ที่ lag อื่น ซึ่งผ่าน minPeakCorr ได้ถ้าไม่ดูที่ 0 ก่อน
-const POLARITY_ZERO_CORR_MAX = -0.15;
+// เทียบความแรง peak(+1) กับ peak(−1) ในช่วง search — ไม่ใช้ corr(lag=0)
+// เพราะ corr(0) = autocorrelation ที่ offset=lag จริง ซึ่งติดลบเองได้ที่ lag ~250ms
+// (false reject polarity ถูก / false accept polarity กลับ)
+const POLARITY_PEAK_MARGIN = 0.05;
 // linear resample คนละ rate + parabolic บน grid อาจมี systematic lag bias ~+2–3ms
-// (ไม่ใช่ noise สองทาง) — รายงานเป็น uncertainty ไม่ใช่แก้ด้วยค่าคงที่เดา
 const SIGNAL_LAG_SYSTEMATIC_UNCERTAINTY_S = 0.003;
 
 function mean(values) {
@@ -385,23 +385,24 @@ export function resampleUniform(t, y, dt, t0, t1) {
  * ประมาณ lag (IMU − MoCap) จาก normalized cross-correlation ของสัญญาณ
  * อิสระจาก event detector → residual HS หลัง align นี้วัด detector timing bias ได้
  *
- * - ไม่ค้น polarity (±1): polarity ถูกกำหนดจาก axis map / นิยามมุมแล้ว
- * - เช็ค corr ที่ lag≈0 ก่อน: ถ้าติดลบชัด → polarity-mismatch (ห้ามไปเชื่อ sidelobe บวกที่ lag อื่น)
+ * - Align ด้วย polarity คงที่ = +1 (ไม่เงียบ flip)
+ * - ตรวจ polarity โดยเทียบ max corr(+1) กับ max corr(−1) = −min corr(+1) ในช่วง search
+ *   ถ้า peak ลบแรงกว่า → polarity-mismatch (axis/มุมกลับ)
+ *   ห้ามใช้ corr(lag=0): ค่านั้นปน lag จริงกับ polarity (autocorr ติดลบเองที่ lag~250ms)
  * - maxLag ต้อง < ครึ่ง stride เพื่อเลี่ยง period aliasing
  * - parabolic interpolation รอบ discrete peak — ยังอาจเหลือ systematic bias ~+2–3ms
- *   จาก linear resample คนละ rate (120 vs 100Hz); อย่าตีความว่าเป็น random error
  *
- * @returns {{ lagS, peakCorr, corrAtZero, polarity, ok, ambiguous, rivalPeaks, reason, systematicUncertaintyS }}
+ * @returns {{ lagS, peakCorr, peakCorrMinus, polarity, ok, ambiguous, rivalPeaks, reason, systematicUncertaintyS }}
  */
 export function estimateSignalLagS(mocapT, mocapY, imuT, imuY, options = {}) {
   const maxLagS = options.maxLagS ?? DEFAULT_MAX_LAG_S;
   const dt = options.dtS ?? DEFAULT_XCORR_DT_S;
   const minPeakCorr = options.minPeakCorr ?? DEFAULT_MIN_PEAK_CORR;
-  const polarityZeroMax = options.polarityZeroCorrMax ?? POLARITY_ZERO_CORR_MAX;
+  const polarityMargin = options.polarityPeakMargin ?? POLARITY_PEAK_MARGIN;
   const empty = {
     lagS: null,
     peakCorr: null,
-    corrAtZero: null,
+    peakCorrMinus: null,
     polarity: 1,
     ok: false,
     ambiguous: false,
@@ -435,8 +436,7 @@ export function estimateSignalLagS(mocapT, mocapY, imuT, imuY, options = {}) {
   }
 
   function nccAtLag(lagSamples) {
-    // corr(ref[i], sig[i + lagSamples]) — lagSamples>0 = IMU ช้ากว่า (เหตุการณ์มาทีหลัง)
-    // polarity คงที่ = +1 (ไม่ค้น ±1 — กัน half-period ambiguity ของสัญญาณคาบ)
+    // corr(ref[i], sig[i + lagSamples]) — lagSamples>0 = IMU ช้ากว่า
     let sumR = 0;
     let sumS = 0;
     let sumRR = 0;
@@ -466,6 +466,7 @@ export function estimateSignalLagS(mocapT, mocapY, imuT, imuY, options = {}) {
   const corrByLag = new Map();
   let bestLagSamples = 0;
   let bestCorr = -Infinity;
+  let minCorr = Infinity;
   for (let lagSamples = -maxLagSamples; lagSamples <= maxLagSamples; lagSamples += 1) {
     const corr = nccAtLag(lagSamples);
     if (corr == null) continue;
@@ -474,26 +475,23 @@ export function estimateSignalLagS(mocapT, mocapY, imuT, imuY, options = {}) {
       bestCorr = corr;
       bestLagSamples = lagSamples;
     }
+    if (corr < minCorr) minCorr = corr;
   }
 
-  const corrAtZero = corrByLag.has(0) ? corrByLag.get(0) : nccAtLag(0);
+  // corr(ref, −sig) ที่ lag ใด = −corr(ref, sig) ที่ lag นั้น
+  // → ความแรงของ best polarity−1 ในช่วง search = −minCorr
+  const peakCorrMinus = Number.isFinite(minCorr) ? -minCorr : null;
 
   if (!(bestCorr > -Infinity)) {
-    return {
-      ...empty,
-      corrAtZero,
-      reason: 'weak-correlation',
-    };
+    return { ...empty, reason: 'weak-correlation' };
   }
 
-  // สำคัญ: เช็ค polarity ที่ lag≈0 ก่อนเชื่อ peak ที่อื่น
-  // สัญญาณกลับขั้ว + sync offset น้อย ๆ มักได้ sidelobe บวก ~0.6 ที่ lag ≠ 0 ซึ่งผ่าน
-  // minPeakCorr ได้ — ถ้าไม่ดู corr(0) จะเงียบ flip และรายงาน HS timing ผิดทั้ง trial
-  if (Number.isFinite(corrAtZero) && corrAtZero < polarityZeroMax) {
+  // polarity−1 ชนะชัด → ขั้วกลับ (ไม่เงียบ flip ไปใช้ −1)
+  if (Number.isFinite(peakCorrMinus) && peakCorrMinus > bestCorr + polarityMargin) {
     return {
       lagS: null,
       peakCorr: bestCorr,
-      corrAtZero,
+      peakCorrMinus,
       polarity: 1,
       ok: false,
       ambiguous: false,
@@ -503,11 +501,30 @@ export function estimateSignalLagS(mocapT, mocapY, imuT, imuY, options = {}) {
     };
   }
 
+  // สอง polarity ใกล้กัน (สัญญาณสมมาตร / half-period) → เชื่อไม่ได้
+  if (
+    Number.isFinite(peakCorrMinus)
+    && Math.abs(peakCorrMinus - bestCorr) <= polarityMargin
+    && bestCorr >= minPeakCorr
+  ) {
+    return {
+      lagS: null,
+      peakCorr: bestCorr,
+      peakCorrMinus,
+      polarity: 1,
+      ok: false,
+      ambiguous: true,
+      rivalPeaks: [],
+      reason: 'ambiguous-polarity',
+      systematicUncertaintyS: SIGNAL_LAG_SYSTEMATIC_UNCERTAINTY_S,
+    };
+  }
+
   if (!(bestCorr >= minPeakCorr)) {
     return {
       lagS: null,
       peakCorr: bestCorr,
-      corrAtZero,
+      peakCorrMinus,
       polarity: 1,
       ok: false,
       ambiguous: false,
@@ -517,7 +534,7 @@ export function estimateSignalLagS(mocapT, mocapY, imuT, imuY, options = {}) {
     };
   }
 
-  // rival peaks = local maxima ที่ corr ≥ 95% ของ peak หลัก (ไม่นับตัวอย่างบนไหล่ peak เดียวกัน)
+  // rival peaks = local maxima ที่ corr ≥ 95% ของ peak หลัก
   const rivalPeaks = [];
   for (const [lagSamples, corr] of corrByLag) {
     if (lagSamples === bestLagSamples) continue;
@@ -530,8 +547,6 @@ export function estimateSignalLagS(mocapT, mocapY, imuT, imuY, options = {}) {
   }
   const ambiguous = rivalPeaks.length > 0;
 
-  // parabolic interpolation รอบ discrete peak → sub-sample lag
-  // หมายเหตุ: ยังอาจเหลือ systematic bias ~+2–3ms จาก linear resample คนละ rate
   const ym1 = corrByLag.get(bestLagSamples - 1);
   const y0 = bestCorr;
   const yp1 = corrByLag.get(bestLagSamples + 1);
@@ -546,7 +561,7 @@ export function estimateSignalLagS(mocapT, mocapY, imuT, imuY, options = {}) {
   return {
     lagS: (bestLagSamples + frac) * dt,
     peakCorr: bestCorr,
-    corrAtZero,
+    peakCorrMinus,
     polarity: 1,
     ok: !ambiguous,
     ambiguous,
@@ -785,10 +800,15 @@ export function compareMocapToImu(mocap, imuTrace, options = {}) {
         alignOpts.lagSource = 'signal-xcorr';
       } else {
         const detail = signalLag.reason === 'polarity-mismatch' || signalLag.reason === 'inverted-polarity'
-          ? `corr(0)=${Number.isFinite(signalLag.corrAtZero) ? signalLag.corrAtZero.toFixed(2) : '—'} ติดลบ — ตรวจ axis map / นิยามมุม (ไม่เงียบ flip)`
-          : signalLag.reason === 'ambiguous-period-peaks'
-            ? `peak ใกล้เคียงกันหลายจุด (rival ${signalLag.rivalPeaks?.slice(0, 3).map((p) => `${p.lagS.toFixed(3)}s`).join(', ')})`
-            : signalLag.reason;
+          ? `peak(+)=${Number.isFinite(signalLag.peakCorr) ? signalLag.peakCorr.toFixed(2) : '—'} `
+            + `< peak(−)=${Number.isFinite(signalLag.peakCorrMinus) ? signalLag.peakCorrMinus.toFixed(2) : '—'} `
+            + '— ตรวจ axis map / นิยามมุม (ไม่เงียบ flip)'
+          : signalLag.reason === 'ambiguous-polarity'
+            ? `peak(+)/peak(−) ใกล้กัน (${Number.isFinite(signalLag.peakCorr) ? signalLag.peakCorr.toFixed(2) : '—'}/`
+              + `${Number.isFinite(signalLag.peakCorrMinus) ? signalLag.peakCorrMinus.toFixed(2) : '—'})`
+            : signalLag.reason === 'ambiguous-period-peaks'
+              ? `peak ใกล้เคียงกันหลายจุด (rival ${signalLag.rivalPeaks?.slice(0, 3).map((p) => `${p.lagS.toFixed(3)}s`).join(', ')})`
+              : signalLag.reason;
         warnings.push(
           `ขา ${side}: signal xcorr ใช้ไม่ได้ (${detail}) — fallback เป็น HS-event lag `
           + '(residual timing ไม่ใช่เมตริก detector bias)',
@@ -845,7 +865,7 @@ export function compareMocapToImu(mocap, imuTrace, options = {}) {
         lagS: alignment.lagS,
         lagSource: alignment.lagSource,
         signalPeakCorr: signalLag?.ok ? signalLag.peakCorr : null,
-        corrAtZero: signalLag?.corrAtZero ?? null,
+        peakCorrMinus: signalLag?.peakCorrMinus ?? null,
         systematicUncertaintyS: signalLag?.systematicUncertaintyS ?? null,
         pairedCount: alignment.pairs.length,
         unpairedMocap: alignment.unpairedMocap,
@@ -900,7 +920,7 @@ export function compareMocapToImu(mocap, imuTrace, options = {}) {
       'Stance% คนละนิยาม event ได้ (MoCap = ankle velocity quiet, IMU = gyro HS/TO)',
       'Align ลำดับ: signal xcorr (mocap ω × IMU gx) ก่อน แล้วค่อย HS-event lag สำหรับจับคู่ cycle',
       'HS timing residual ใช้ได้เฉพาะเมื่อ lagSource=signal-xcorr — ถ้า sync จาก HS events เอง bias ถูกดูดเข้า lag',
-      'Signal xcorr เช็ค corr(lag≈0) ก่อน: ติดลบชัด = polarity-mismatch (ไม่เชื่อ sidelobe บวกที่ lag อื่น)',
+      'Signal xcorr เทียบ peak(+1) กับ peak(−1) ในช่วง search: ถ้า −1 แรงกว่า = polarity-mismatch (ไม่ใช้ corr(lag=0) เพราะปนกับ lag จริง)',
       'Signal lag มี systematic uncertainty ~±3ms จาก linear resample คนละ rate — ไม่ใช่ random ที่เฉลี่ยหาย',
       'sum(stride) ต่อข้าง ≠ ระยะเดินจริงแบบ 1:1 ถ้าสองข้างบันทึกพร้อมกัน (อย่าบวก L+R)',
     ],

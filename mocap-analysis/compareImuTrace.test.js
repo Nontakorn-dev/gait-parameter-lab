@@ -318,7 +318,25 @@ test('🔴 estimateSignalLagS: maxLag กว้างเกินไป → peri
   assert.ok(Math.abs(good.lagS - trueLagS) < 0.005, `default-range lag=${good.lagS}`);
 });
 
-test('🔴 estimateSignalLagS: polarity คงที่ — สัญญาณกลับเครื่องหมาย → polarity-mismatch', () => {
+test('🔴 estimateSignalLagS: polarity ถูก + lag ใหญ่ ต้องไม่ false-reject', () => {
+  const dt = 0.005;
+  const n = 2000;
+  const t = Array.from({ length: n }, (_, i) => i * dt);
+  const y = t.map((x) => Math.sin(2 * Math.PI * x) + 0.4 * Math.sin(4 * Math.PI * x) + 0.15 * Math.sin(6 * Math.PI * x));
+  for (const lag of [0.30, 0.38]) {
+    const shifted = t.map((tt) => (
+      Math.sin(2 * Math.PI * (tt - lag))
+      + 0.4 * Math.sin(4 * Math.PI * (tt - lag))
+      + 0.15 * Math.sin(6 * Math.PI * (tt - lag))
+    ));
+    const result = estimateSignalLagS(t, y, t, shifted, { maxLagS: 0.4, dtS: dt });
+    assert.equal(result.ok, true, `lag=${lag}s ต้องผ่าน ได้ reason=${result.reason} peak=${result.peakCorr}`);
+    assert.ok(Math.abs(result.lagS - lag) < 0.01, `lag=${result.lagS} want ${lag}`);
+    assert.ok(result.peakCorr > result.peakCorrMinus, 'peak(+) ต้องชนะ peak(−)');
+  }
+});
+
+test('🔴 estimateSignalLagS: กลับขั้ว → polarity-mismatch (ไม่ใช้ corrAtZero)', () => {
   const dt = 0.005;
   const n = 2000;
   const t = Array.from({ length: n }, (_, i) => i * dt);
@@ -332,25 +350,25 @@ test('🔴 estimateSignalLagS: polarity คงที่ — สัญญาณ�
   const inverted = estimateSignalLagS(t, y, t, y.map((v) => -v), { maxLagS: 0.4, dtS: dt });
   assert.equal(inverted.ok, false);
   assert.equal(inverted.reason, 'polarity-mismatch');
-  assert.ok(inverted.corrAtZero < -0.15, `corr(0)=${inverted.corrAtZero}`);
+  assert.ok(inverted.peakCorrMinus > inverted.peakCorr + 0.05);
 });
 
-test('🔴 estimateSignalLagS: กลับขั้ว+lag ไม่เงียบ flip ไป sidelobe บวก (corr~0.6)', () => {
-  // regression: sine-like กลับขั้วแล้วเลื่อน → peak บวกที่ lag อื่น corr~0.7 ผ่านเกณฑ์เดิมได้
+test('🔴 estimateSignalLagS: กลับขั้ว+lag ไม่เงียบ flip / ไม่หลุดที่ corr(0)≈0', () => {
   const dt = 0.005;
   const n = 2000;
   const t = Array.from({ length: n }, (_, i) => i * dt);
   const y = t.map((x) => Math.sin(2 * Math.PI * x) + 0.4 * Math.sin(4 * Math.PI * x) + 0.15 * Math.sin(6 * Math.PI * x));
-  const lag = 0.1;
-  const invertedShifted = t.map((tt) => -(
-    Math.sin(2 * Math.PI * (tt - lag))
-    + 0.4 * Math.sin(4 * Math.PI * (tt - lag))
-    + 0.15 * Math.sin(6 * Math.PI * (tt - lag))
-  ));
-  const result = estimateSignalLagS(t, y, t, invertedShifted, { maxLagS: 0.4, dtS: dt });
-  assert.equal(result.ok, false, `ต้องไม่ ok เมื่อกลับขั้ว ได้ lag=${result.lagS} corr=${result.peakCorr}`);
-  assert.equal(result.reason, 'polarity-mismatch');
-  assert.ok(result.corrAtZero < -0.15, `corr(0)=${result.corrAtZero} ต้องติดลบชัด`);
+  for (const lag of [0.10, 0.20]) {
+    const invertedShifted = t.map((tt) => -(
+      Math.sin(2 * Math.PI * (tt - lag))
+      + 0.4 * Math.sin(4 * Math.PI * (tt - lag))
+      + 0.15 * Math.sin(6 * Math.PI * (tt - lag))
+    ));
+    const result = estimateSignalLagS(t, y, t, invertedShifted, { maxLagS: 0.4, dtS: dt });
+    assert.equal(result.ok, false, `กลับขั้ว lag=${lag} ต้องไม่ ok ได้ ${JSON.stringify(result)}`);
+    assert.equal(result.reason, 'polarity-mismatch');
+    assert.ok(result.peakCorrMinus > result.peakCorr, `peak(−)=${result.peakCorrMinus} ต้อง > peak(+)=${result.peakCorr}`);
+  }
 });
 
 test('🔴 estimateSignalLagS: ไม่ Math.min-spread crash กับ series ยาว 150k', () => {
