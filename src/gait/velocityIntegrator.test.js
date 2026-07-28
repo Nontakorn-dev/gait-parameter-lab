@@ -47,10 +47,15 @@ test('velocityPreDriftCorrection: ต่างจาก velocity (post-correctio
   );
 
   assert.equal(velocityPreDriftCorrection.length, velocity.length);
-  // post-correction: correctDrift บังคับ v=0 ที่ปลายทั้งสองเสมอโดยนิยาม
+  // start-only ZUPT: บังคับ v=0 ที่ต้น ไม่บังคับปลาย (shank มักยังไม่นิ่ง)
   assert.ok(Math.abs(velocity[0]) < 1e-9, 'post-correction v เริ่มต้องเป็น 0');
-  assert.ok(Math.abs(velocity[velocity.length - 1]) < 1e-9, 'post-correction v ปลายต้องเป็น 0');
-  // pre-correction: ค่าจริงก่อนถูกบังคับ ต้องต่างจาก post-correction (นี่คือประเด็นที่ export ไว้ตรวจ ZUPT)
+  assert.ok(
+    Math.abs(velocity[velocity.length - 1] - (
+      velocityPreDriftCorrection[velocityPreDriftCorrection.length - 1]
+      - velocityPreDriftCorrection[0]
+    )) < 1e-9,
+    'ปลายหลังแก้ = pre − vStart',
+  );
   assert.notEqual(velocityPreDriftCorrection[velocityPreDriftCorrection.length - 1], 0,
     'pre-correction v ปลายไม่ควรเป็น 0 พอดี (สัญญาณทดสอบมี drift จริง)');
 });

@@ -1,6 +1,7 @@
 import { GaitEventDetector } from './gaitEventDetector.js';
 import { DEFAULT_SHANK_LENGTH_M } from './gaitCalibration.js';
 import { KalmanFilter } from './kalmanFilter.js';
+import { MadgwickFilter } from './madgwickFilter.js';
 import { rawAccelToG, rawGyroToDps, accelToAngle, movingAverage } from './signalUtils.js';
 import { VelocityIntegrator } from './velocityIntegrator.js';
 
@@ -11,10 +12,11 @@ const G_MS2 = 9.81;
 const EPOCH_THRESHOLD_MS = 946684800000;
 const STANCE_ENTRY_ANGULAR_VELOCITY_ABS = 5;
 // การ integrate ความเร่งตลอด HS→HS ของขาเดียวกัน = ระยะ 1 stride โดยตรง
-// step = stride/2 (ประมาณ เพราะเซนเซอร์ข้างเดียววัด step ของขาตรงข้ามไม่ได้)
 // floor ต่ำ (0.10) เพื่อไม่ทำลายข้อมูลผู้ป่วย stroke ที่ stride สั้นกว่า 0.30m ได้จริง
 const STRIDE_LENGTH_MIN_M = 0.10;
 const STRIDE_LENGTH_MAX_M = 1.80;
+/** |v_end| ก่อน de-drift สูงเกินนี้ = gravity leakage / ZUPT พัง → ไม่เชื่อระยะ */
+export const MAX_V_END_PRE_DRIFT_MPS = 2.0;
 const STANCE_ENTRY_THRESHOLD_MIN = 3;
 const STANCE_ENTRY_THRESHOLD_MAX = 12;
 const STANCE_ENTRY_VALLEY_THRESHOLD_MAX = 40;
@@ -380,8 +382,14 @@ function readGyroDps(sample, gyroBiasDps) {
 }
 
 export class GaitProcessor {
-  constructor() {
+  /**
+   * @param {Object} [options]
+   * @param {'madgwick'|'kalman'} [options.orientationFilter='kalman']
+   */
+  constructor(options = {}) {
+    this.orientationFilterMode = options.orientationFilter === 'madgwick' ? 'madgwick' : 'kalman';
     this.kalman = new KalmanFilter(1.0 / SAMPLE_RATE);
+    this.madgwick = new MadgwickFilter({ samplePeriod: 1.0 / SAMPLE_RATE, beta: 0.08 });
     this.eventDetector = new GaitEventDetector(PATIENT_EVENT_DETECTOR_OPTIONS);
     this.velocityIntegrator = new VelocityIntegrator({ sampleRate: SAMPLE_RATE });
 
@@ -437,6 +445,7 @@ export class GaitProcessor {
       quality: profile.quality ?? null,
     };
     this.kalman.reset();
+    this.madgwick.reset();
   }
 
   getCalibration() {
@@ -459,6 +468,7 @@ export class GaitProcessor {
     const azRaw = getRawAxis(sample, 'az', 'raw_accel', 2);
     const gyro = readGyroDps(sample, this.gyroBiasDps);
     // แกนหาย → ห้ามแทน 0 (จะหลอกว่านิ่ง/ไม่มีหมุน → HS/ZUPT ผิด)
+    // Madgwick ใช้ gyro 3 แกน; ถ้า gy/gz หาย เติม 0 ได้เฉพาะเมื่อโหมด kalman 1D
     if (![axRaw, ayRaw, azRaw, gyro.gx].every(Number.isFinite)) {
       this.skippedIncompleteSampleCount += 1;
       return;
@@ -472,13 +482,22 @@ export class GaitProcessor {
 
     const dtSeconds = this.getSampleIntervalSeconds(timestampMs);
     const gx = gyro.gx;
+    const gy = Number.isFinite(gyro.gy) ? gyro.gy : 0;
+    const gz = Number.isFinite(gyro.gz) ? gyro.gz : 0;
     const aXg = rawAccelToG(axRaw);
     const aYg = rawAccelToG(ayRaw);
     const aZg = rawAccelToG(azRaw);
     const accelAngle = accelToAngle(aYg, aZg);
-    // ‖accel‖ (3 แกน) ใช้ gate ความเชื่อ accel: ใกล้ 1g = gravity ล้วน, เบี่ยงมาก = มี motion accel
     const accelMagnitudeG = Math.sqrt(aXg * aXg + aYg * aYg + aZg * aZg);
-    const shankAngle = this.kalman.update(gx, accelAngle, dtSeconds, accelMagnitudeG);
+
+    let shankAngle;
+    let orientation = null;
+    if (this.orientationFilterMode === 'madgwick') {
+      orientation = this.madgwick.update(gx, gy, gz, aXg, aYg, aZg, dtSeconds);
+      shankAngle = this.madgwick.getSagittalAngleDeg();
+    } else {
+      shankAngle = this.kalman.update(gx, accelAngle, dtSeconds, accelMagnitudeG);
+    }
 
     if (!this.sessionStartTime) {
       this.sessionStartTime = timestampMs;
@@ -490,6 +509,7 @@ export class GaitProcessor {
       sampleId: this.nextSampleId,
       timestampMs,
       shankAngle,
+      orientation,
     });
     this.nextSampleId += 1;
 
@@ -511,6 +531,7 @@ export class GaitProcessor {
     const axG = new Array(sampleCount);
     const ayG = new Array(sampleCount);
     const azG = new Array(sampleCount);
+    const orientations = new Array(sampleCount);
     const firstTimestampMs = samples[0]?.timestampMs ?? null;
 
     for (let i = 0; i < sampleCount; i += 1) {
@@ -530,6 +551,7 @@ export class GaitProcessor {
       ayG[i] = aYg;
       azG[i] = aZg;
       shankAngle[i] = Number.isFinite(sample.shankAngle) ? sample.shankAngle : 0;
+      orientations[i] = sample.orientation || null;
     }
 
     const { events, cycles } = this.eventDetector.detect(angVelDeg, timestamps);
@@ -544,6 +566,9 @@ export class GaitProcessor {
     const strideClampedFlags = [];
     const strideSignedLengths = [];
     const zuptAccelDeviations = [];
+    const strideUntrustedFlags = [];
+    const vEndPreDriftByCycle = [];
+    const vStartPreDriftByCycle = [];
 
     for (const cycle of cycles) {
       // นับทุก cycle ที่ยังไม่เคยนับ (ไม่ใช่แค่ cycle สุดท้าย) เพื่อไม่ให้พลาด
@@ -583,13 +608,20 @@ export class GaitProcessor {
       peakAngles.push(peakAngle);
 
       // integration / clearance ยังใช้ quiet-bounded window ตามเดิม
+      const cycleAx = [];
       const cycleAy = [];
       const cycleAz = [];
       const cycleAngles = [];
+      const cycleQuats = [];
+      let madgwickComplete = this.orientationFilterMode === 'madgwick';
       for (let j = segmentStartIdx; j <= segmentEndIdx && j < sampleCount; j += 1) {
+        cycleAx.push(axG[j] * G_MS2);
         cycleAy.push(ayG[j] * G_MS2);
         cycleAz.push(azG[j] * G_MS2);
         cycleAngles.push(shankAngle[j]);
+        const q = orientations[j];
+        if (!q) madgwickComplete = false;
+        cycleQuats.push(q);
       }
 
       // dt จริงเฉลี่ยของ window จาก timestamp (วินาที) เพื่อให้ double integration
@@ -612,6 +644,8 @@ export class GaitProcessor {
           integrationStartIdx: localIntegrationStartIdx,
           integrationEndIdx: localIntegrationEndIdx,
           dt: winDt,
+          axArray: madgwickComplete ? cycleAx : undefined,
+          quaternions: madgwickComplete ? cycleQuats : undefined,
         },
       );
       const strideLength = Math.max(
@@ -634,28 +668,41 @@ export class GaitProcessor {
         Number.isFinite(startDev) ? startDev : 0,
         Number.isFinite(endDev) ? endDev : 0,
       );
+      const vEndPreDrift = velocityPreDriftCorrection?.length
+        ? velocityPreDriftCorrection[velocityPreDriftCorrection.length - 1]
+        : null;
+      const vStartPreDrift = velocityPreDriftCorrection?.length
+        ? velocityPreDriftCorrection[0]
+        : null;
+      // |v_end| สูง = มี accel ค้างจาก gravity leakage → de-drift ลบได้แค่เชิงเส้น
+      const strideUntrusted = Number.isFinite(vEndPreDrift)
+        && Math.abs(vEndPreDrift) > MAX_V_END_PRE_DRIFT_MPS;
 
       strideLengths.push(strideLength);
       clearances.push(Math.max(0, Math.min(0.3, clearance)));
       strideClampedFlags.push(strideClamped);
+      strideUntrustedFlags.push(strideUntrusted);
       strideSignedLengths.push(strideLengthSigned);
       zuptAccelDeviations.push(zuptDeviation);
+      vEndPreDriftByCycle.push(Number.isFinite(vEndPreDrift) ? vEndPreDrift : null);
+      vStartPreDriftByCycle.push(Number.isFinite(vStartPreDrift) ? vStartPreDrift : null);
 
       // เก็บ ZUPT diagnostic ของ "ทุก" cycle ใหม่ (ไม่ใช่แค่ cycle สุดท้ายที่ latestParams เก็บ)
       // เพื่อให้วิเคราะห์ได้ว่า window วางผิดจุดเป็นระบบหรือแค่บางจังหวะ — วางคู่กับ isNewCycle
       // เดียวกับที่ใช้นับ step เพื่อไม่ให้ diagnostic ซ้ำ cycle เดิมเวลา buffer overlap กันข้าม analyze()
       if (isNewCycle) {
-        const preDrift = velocityPreDriftCorrection || [];
         this.pendingCycleDiagnostics.push({
           cycleKey: String(countableCycleStartSampleId),
           cycleStartTimestampMs: samples[cycle.hsStart.index]?.timestampMs ?? null,
-          strideLengthM: strideLength,
-          strideLengthClamped: strideClamped,
+          strideLengthM: strideUntrusted ? null : strideLength,
+          strideLengthClamped: strideClamped || strideUntrusted,
+          strideLengthUntrusted: strideUntrusted,
           zuptCheck: {
-            vStartPreDrift: Number.isFinite(preDrift[0]) ? preDrift[0] : null,
-            vEndPreDrift: Number.isFinite(preDrift[preDrift.length - 1]) ? preDrift[preDrift.length - 1] : null,
+            vStartPreDrift: Number.isFinite(vStartPreDrift) ? vStartPreDrift : null,
+            vEndPreDrift: Number.isFinite(vEndPreDrift) ? vEndPreDrift : null,
             windowSource: integrationWindow.source ?? null,
             zuptAccelDeviationG: Number.isFinite(zuptDeviation) ? zuptDeviation : null,
+            maxVEndPreDriftMps: MAX_V_END_PRE_DRIFT_MPS,
           },
         });
         // กันโตไม่จำกัดถ้าไม่มีใคร drain (เช่น analyze() ถูกเรียกโดยไม่มี consumer)
@@ -691,6 +738,7 @@ export class GaitProcessor {
     const lastIntegrationWindow = integrationWindows[lastIdx] ?? null;
     const strideLengthLast = strideLengths[lastIdx];
     const strideClampedLast = strideClampedFlags[lastIdx] ?? false;
+    const strideUntrustedLast = strideUntrustedFlags[lastIdx] ?? false;
     const strideSignedLast = strideSignedLengths[lastIdx];
     const zuptAccelDeviationLast = zuptAccelDeviations[lastIdx];
     const strideTimeLast = strideTimes[lastIdx];
@@ -702,6 +750,15 @@ export class GaitProcessor {
     const cycleEndSample = samples[lastCycle.hsEnd.index] ?? null;
     const cycleStartSampleId = cycleStartSample?.sampleId ?? null;
     const cycleStartTimestampMs = cycleStartSample?.timestampMs ?? null;
+
+    // zuptCheck ของ cycle ล่าสุด — ให้ reprocess/UI เห็น vEnd เสมอ
+    const lastZuptCheck = {
+      vStartPreDrift: vStartPreDriftByCycle[lastIdx] ?? null,
+      vEndPreDrift: vEndPreDriftByCycle[lastIdx] ?? null,
+      windowSource: lastIntegrationWindow?.source ?? null,
+      zuptAccelDeviationG: Number.isFinite(zuptAccelDeviationLast) ? zuptAccelDeviationLast : null,
+      maxVEndPreDriftMps: MAX_V_END_PRE_DRIFT_MPS,
+    };
 
     // ตัด id ของ cycle ที่เลื่อนออกจาก buffer แล้วทิ้ง (ตรวจซ้ำไม่ได้อีก) เพื่อไม่ให้ Set โตไม่จำกัด
     const oldestBufferedSampleId = samples[0]?.sampleId ?? null;
@@ -729,12 +786,14 @@ export class GaitProcessor {
     const doubleSupport = null;
 
     this.latestParams = {
-      strideLength: strideLengthLast,
+      strideLength: strideUntrustedLast ? null : strideLengthLast,
       stepLength,
       // clinical metadata: แยกค่าที่ถูก clamp ออกจากค่าวัดจริง + ธง ZUPT low-confidence
-      strideLengthClamped: strideClampedLast,
+      strideLengthClamped: strideClampedLast || strideUntrustedLast,
+      strideLengthUntrusted: strideUntrustedLast,
       strideLengthSignedM: strideSignedLast,
       zuptAccelDeviationG: Number.isFinite(zuptAccelDeviationLast) ? zuptAccelDeviationLast : null,
+      zuptCheck: lastZuptCheck,
       clearance: clearanceLast,
       cadence,
       strideTime: strideTimeLast,
@@ -744,9 +803,10 @@ export class GaitProcessor {
       stancePct: stancePctLast,
       swingPct: swingPctLast,
       temporalSource: lastCycle.temporalSource ?? null,
-      walkingSpeed,
+      walkingSpeed: strideUntrustedLast ? null : walkingSpeed,
       peakShankAngle: peakAngleLast,
       doubleSupport,
+      orientationFilter: this.orientationFilterMode,
       stepCount: this.totalStepCount,
       strideCount: this.totalStrideCount,
       sessionDuration,
@@ -802,6 +862,7 @@ export class GaitProcessor {
   reset() {
     this.buffer = [];
     this.kalman.reset();
+    this.madgwick.reset();
     this.latestParams = null;
     this.totalStepCount = 0;
     this.totalStrideCount = 0;

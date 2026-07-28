@@ -1,4 +1,5 @@
 import { deg2rad, trapezoidalIntegrate } from './signalUtils.js';
+import { sensorAccelToGaitFrame } from './madgwickFilter.js';
 
 export class VelocityIntegrator {
   constructor(options = {}) {
@@ -18,6 +19,14 @@ export class VelocityIntegrator {
     return { aVert, aHoriz };
   }
 
+  /**
+   * @param {number[]} ayArray  m/s²
+   * @param {number[]} azArray  m/s²
+   * @param {number[]} angles   deg (1D sagittal) — ใช้เมื่อไม่มี quaternions
+   * @param {object} [options]
+   * @param {number[]} [options.axArray]  m/s² — จำเป็นเมื่อใช้ Madgwick quat
+   * @param {Array<{q0,q1,q2,q3}>} [options.quaternions]
+   */
   computeStrideMetrics(ayArray, azArray, angles, options = {}) {
     // ใช้ dt จริงจาก timestamp เมื่อส่งมา (ทนต่อ dropped sample) ไม่งั้น fallback เป็น nominal
     const dt = Number.isFinite(options.dt) && options.dt > 0 ? options.dt : this.dt;
@@ -40,11 +49,30 @@ export class VelocityIntegrator {
 
     const aHoriz = new Array(sampleCount);
     const aVertLinear = new Array(sampleCount);
+    const quaternions = options.quaternions;
+    const axArray = options.axArray;
+    const useMadgwick = Array.isArray(quaternions)
+      && quaternions.length === sampleCount
+      && Array.isArray(axArray)
+      && axArray.length === sampleCount;
 
     for (let i = 0; i < sampleCount; i += 1) {
-      const world = this.sensorToWorld(ayArray[i], azArray[i], angles[i]);
-      aHoriz[i] = world.aHoriz;
-      aVertLinear[i] = world.aVert - this.gravity;
+      if (useMadgwick && quaternions[i]) {
+        const { q0, q1, q2, q3 } = quaternions[i];
+        const frame = sensorAccelToGaitFrame(
+          axArray[i] / this.gravity,
+          ayArray[i] / this.gravity,
+          azArray[i] / this.gravity,
+          q0, q1, q2, q3,
+          this.gravity,
+        );
+        aHoriz[i] = frame.aForward;
+        aVertLinear[i] = frame.aVert;
+      } else {
+        const world = this.sensorToWorld(ayArray[i], azArray[i], angles[i]);
+        aHoriz[i] = world.aHoriz;
+        aVertLinear[i] = world.aVert - this.gravity;
+      }
     }
 
     const swingHoriz = [];
@@ -67,9 +95,6 @@ export class VelocityIntegrator {
       };
     }
 
-    // เก็บ velocity "ก่อน" correctDrift ไว้ด้วย — correctDrift บังคับ v=0 ที่ปลายทั้งสอง
-    // เสมอโดยนิยาม จึงใช้ velocity หลัง correction ตรวจสอบสมมติฐาน ZUPT (ปลาย window
-    // นิ่งจริงไหม) ไม่ได้ ต้องดูค่าก่อนแก้เพื่อรู้ว่าปลายเบี่ยงจาก 0 มากแค่ไหนก่อนถูกบังคับทิ้ง
     const velocityPreDriftCorrection = trapezoidalIntegrate(swingHoriz, dt);
     const velocity = this.correctDrift(velocityPreDriftCorrection);
     const displacement = trapezoidalIntegrate(velocity, dt);
@@ -91,7 +116,6 @@ export class VelocityIntegrator {
 
     return {
       strideLength,
-      // ค่ามีเครื่องหมายไว้ debug: ถ้า axis-map sign ผิด abs() จะปิดบัง แต่ค่านี้จะเป็นลบ
       strideLengthSigned: signedDisplacement,
       clearance,
       velocity,
@@ -108,13 +132,14 @@ export class VelocityIntegrator {
       return velocity;
     }
 
+    // ZUPT ที่ปลายสองด้านสมมติแรงเกินไปบน shank: ช่วงปลาย window มักยังไม่นิ่งจริง
+    // (|v_end| ค้าง) การลบ linear ramp ไปหา v_end=0 จะตัดความเร็วจริง → ระยะสั้น ~20%
+    // บน walk 3 m จริง. รีเซ็ตแค่ v_start (หลัง HS / ต้น quiet) ซึ่งเชื่อถือได้กว่า
+    // เก็บ velocityPreDriftCorrection ไว้ดู |v_end| เป็น quality gate แยก
     const vStart = velocity[0];
-    const vEnd = velocity[sampleCount - 1];
-    const driftPerSample = (vEnd - vStart) / (sampleCount - 1);
-
     const corrected = new Array(sampleCount);
     for (let i = 0; i < sampleCount; i += 1) {
-      corrected[i] = velocity[i] - (vStart + driftPerSample * i);
+      corrected[i] = velocity[i] - vStart;
     }
 
     return corrected;

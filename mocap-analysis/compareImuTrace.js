@@ -35,6 +35,8 @@ const POLARITY_PEAK_MARGIN = 0.05;
 const SIGNAL_LAG_SYSTEMATIC_UNCERTAINTY_S = 0.003;
 const ONSET_SUSTAIN_S = 0.08;
 const DEFAULT_MAX_ZUPT_DEV_G = 0.25;
+/** |v_end| ก่อน de-drift — สูง = gravity leakage; สอดคล้อง gaitProcessor.MAX_V_END_PRE_DRIFT_MPS */
+const DEFAULT_MAX_V_END_PRE_DRIFT_MPS = 2.0;
 const DEFAULT_MIN_AGREEMENT_PAIRS = 3;
 
 function mean(values) {
@@ -121,6 +123,7 @@ function cycleEntryFromParams(params, side, sensorKey) {
     sensorKey,
     strideLengthM: params.strideLength,
     strideLengthClamped: params.strideLengthClamped ?? false,
+    strideLengthUntrusted: params.strideLengthUntrusted ?? false,
     strideLengthSignedM: params.strideLengthSignedM ?? null,
     cadenceSpm: params.cadence,
     walkingSpeedMps: params.walkingSpeed,
@@ -146,13 +149,16 @@ function shouldUpgradeCycle(existing, next) {
   if (!Number.isFinite(existing.strideLengthM) && Number.isFinite(next.strideLengthM)) return true;
   // อัปเกรดคุณภาพ temporal / ZUPT metadata
   if (existing.temporalSource !== 'measured-to' && next.temporalSource === 'measured-to') return true;
+  if (!existing.zuptCheck?.vEndPreDrift && next.zuptCheck?.vEndPreDrift != null) return true;
   return false;
 }
 
-/** ก้าวที่เอาเข้า agreement stats ได้ — ตัด clamp / ZUPT พัง / stance หลอก */
+/** ก้าวที่เอาเข้า agreement stats ได้ — ตัด clamp / ZUPT พัง / stance หลอก / v_end สูง */
 export function isAgreementQualityImuCycle(cycle, options = {}) {
   if (!cycle) return false;
   if (cycle.strideLengthClamped) return false;
+  if (cycle.strideLengthUntrusted) return false;
+  if (!Number.isFinite(cycle.strideLengthM)) return false;
   const temporal = cycle.temporalSource;
   if (temporal === 'previous-valid-ratio' || temporal === 'unresolved') return false;
   const maxZupt = options.maxZuptDevG ?? DEFAULT_MAX_ZUPT_DEV_G;
@@ -160,7 +166,10 @@ export function isAgreementQualityImuCycle(cycle, options = {}) {
     ?? cycle.zuptCheck?.zuptAccelDeviationG
     ?? null;
   if (Number.isFinite(zupt) && zupt > maxZupt) return false;
-  return Number.isFinite(cycle.strideLengthM);
+  const maxVEnd = options.maxVEndPreDriftMps ?? DEFAULT_MAX_V_END_PRE_DRIFT_MPS;
+  const vEnd = cycle.zuptCheck?.vEndPreDrift ?? null;
+  if (Number.isFinite(vEnd) && Math.abs(vEnd) > maxVEnd) return false;
+  return true;
 }
 
 /**
@@ -171,6 +180,7 @@ export function reprocessImuTrace(trace, options = {}) {
   const preferSensorFrame = options.preferSensorFrame ?? Boolean(trace.hasSensorFrameRaw);
   const axisMap = options.axisMap || trace.axisMap || undefined;
   const calibrationBySensor = options.calibrationBySensor || trace.calibrationBySensor || {};
+  const orientationFilter = options.orientationFilter || 'kalman';
 
   const samples = Array.isArray(trace.samples) ? trace.samples : [];
   if (!samples.length) {
@@ -193,7 +203,7 @@ export function reprocessImuTrace(trace, options = {}) {
   const qualityFlags = [];
 
   for (const [sensorKey, sensorSamples] of bySensor) {
-    const proc = new GaitProcessor();
+    const proc = new GaitProcessor({ orientationFilter });
     const profile = calibrationBySensor[sensorKey];
     if (profile) {
       proc.applyCalibration(profile);
@@ -212,6 +222,8 @@ export function reprocessImuTrace(trace, options = {}) {
           const existing = seen.get(String(d.cycleKey));
           if (!existing) continue;
           if (d.strideLengthClamped != null) existing.strideLengthClamped = d.strideLengthClamped;
+          if (d.strideLengthUntrusted != null) existing.strideLengthUntrusted = d.strideLengthUntrusted;
+          if (d.strideLengthM !== undefined) existing.strideLengthM = d.strideLengthM;
           if (d.zuptCheck) {
             existing.zuptCheck = d.zuptCheck;
             existing.zuptAccelDeviationG = d.zuptCheck.zuptAccelDeviationG ?? existing.zuptAccelDeviationG;
