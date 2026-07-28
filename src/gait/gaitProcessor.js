@@ -534,7 +534,6 @@ export class GaitProcessor {
 
     const { events, cycles } = this.eventDetector.detect(angVelDeg, timestamps);
     const smoothedAngVel = movingAverage(angVelDeg, 5);
-    const stepLengths = [];
     const strideLengths = [];
     const strideTimes = [];
     const stancePcts = [];
@@ -548,13 +547,16 @@ export class GaitProcessor {
 
     for (const cycle of cycles) {
       // นับทุก cycle ที่ยังไม่เคยนับ (ไม่ใช่แค่ cycle สุดท้าย) เพื่อไม่ให้พลาด
-      // cycle ที่มีอยู่ใน buffer ตั้งแต่ analyze() ครั้งแรก 1 cycle = 1 stride = 2 steps
+      // 1 HS→HS ของขาที่ติดเซนเซอร์ = 1 stride = 1 footfall ของขานั้น
+      // ห้าม ×2 สมมติขาตรงข้าม — เซนเซอร์ข้างเดียว / เดินข้างเดียวจะฟ้องเป็น 2 ก้าวผิด
+      // (step รวมสองข้างทำตอน aggregate เมื่อมี L+R จริง)
       const countableCycleStartSampleId = samples[cycle.hsStart.index]?.sampleId ?? null;
       const isNewCycle = countableCycleStartSampleId !== null
         && !this.countedCycleStartSampleIds.has(countableCycleStartSampleId);
       if (isNewCycle) {
         this.countedCycleStartSampleIds.add(countableCycleStartSampleId);
-        this.totalStepCount += 2;
+        this.totalStrideCount += 1;
+        this.totalStepCount += 1;
       }
 
       const integrationWindow = findStepIntegrationWindow(smoothedAngVel, timestamps, cycle);
@@ -616,7 +618,7 @@ export class GaitProcessor {
         STRIDE_LENGTH_MIN_M,
         Math.min(STRIDE_LENGTH_MAX_M, integratedStrideLength),
       );
-      const stepLength = strideLength / 2; // สมมติสมมาตร L/R — ไม่ใช้กับ stroke asymmetry (ดู bilateral HS)
+      // step length จากเซนเซอร์ข้างเดียววัดไม่ได้โดยตรง — ห้าม stride/2 (สมมาตรหลอก)
       // flag เมื่อค่าถูก clamp (ชนเพดาน/พื้น) เพื่อไม่ให้ปนกับค่าวัดจริงตอนทำ ICC/Bland-Altman
       const strideClamped = integratedStrideLength < STRIDE_LENGTH_MIN_M
         || integratedStrideLength > STRIDE_LENGTH_MAX_M;
@@ -633,7 +635,6 @@ export class GaitProcessor {
         Number.isFinite(endDev) ? endDev : 0,
       );
 
-      stepLengths.push(stepLength);
       strideLengths.push(strideLength);
       clearances.push(Math.max(0, Math.min(0.3, clearance)));
       strideClampedFlags.push(strideClamped);
@@ -688,7 +689,6 @@ export class GaitProcessor {
     const lastIdx = cycles.length - 1;
     const lastCycle = cycles[lastIdx];
     const lastIntegrationWindow = integrationWindows[lastIdx] ?? null;
-    const stepLengthLast = stepLengths[lastIdx];
     const strideLengthLast = strideLengths[lastIdx];
     const strideClampedLast = strideClampedFlags[lastIdx] ?? false;
     const strideSignedLast = strideSignedLengths[lastIdx];
@@ -713,24 +713,20 @@ export class GaitProcessor {
       }
     }
 
-    this.totalStrideCount = Math.floor(this.totalStepCount / 2);
-
     const sessionDuration = this.sessionStartTime && this.latestSampleTimestampMs
       ? (this.latestSampleTimestampMs - this.sessionStartTime) / 1000
       : 0;
 
+    // cadence แบบประมาณ steps/min จากขาเดียว (สากลใน unilateral IMU / เทียบ MoCap)
+    // — ไม่ได้แปลว่า stepCount = 2×strideCount; นับก้าวจริงดู stepCount/aggregate
     const cadence = strideTimeLast > 0 ? (2 / strideTimeLast) * 60 : 0;
-    const stepLength = stepLengthLast;
-    const stepTime = strideTimeLast / 2;
+    const stepLength = null;
+    const stepTime = null;
     const walkingSpeed = strideTimeLast > 0 && Number.isFinite(strideLengthLast)
       ? strideLengthLast / strideTimeLast
       : 0;
-    const doubleSupportPct = Number.isFinite(stancePctLast)
-      ? Math.max(0, 2 * stancePctLast - 100) // สมมติสมมาตร L/R — ไม่ใช่ double-support จริงจาก HS/TO สองข้าง
-      : null;
-    const doubleSupport = Number.isFinite(doubleSupportPct)
-      ? strideTimeLast * doubleSupportPct / 100
-      : null;
+    // double support ต้องมี HS/TO สองข้าง — สูตร 2·stance−100 สมมาตรหลอก (พังกับ stroke)
+    const doubleSupport = null;
 
     this.latestParams = {
       strideLength: strideLengthLast,
@@ -756,7 +752,7 @@ export class GaitProcessor {
       sessionDuration,
       cycleCount: 1,
       strideLengths: Number.isFinite(strideLengthLast) ? [strideLengthLast] : [],
-      stepLengths: [stepLengthLast],
+      stepLengths: [],
       strideTimes: [strideTimeLast],
       cycleStartSampleId,
       cycleStartTimestampMs,

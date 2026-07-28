@@ -48,7 +48,7 @@ node mocap-analysis/compare.js mocap.gait-params.json path/to/imu-trace.json \
 | stancePct | **ไม่ได้** เป็น primary — คนละนิยาม event; MoCap มี bias ~−3% vs synthetic |
 | peakShankAngleDeg | **ไม่ได้** จนกว่าจะมี angleOffset จากยืนนิ่ง |
 | clearance | **ไม่ได้** — คนละจุดกายวิภาค |
-| stepLength / doubleSupport | **ไม่ได้** กับ stroke — สูตรสมมาตร L/R |
+| stepLength / doubleSupport | **ไม่ได้** จากเซนเซอร์ข้างเดียว — ห้าม stride/2 หรือ 2·stance−100; ต้องมี HS สองข้าง |
 
 ## กรองคุณภาพอัตโนมัติแล้ว
 

@@ -11,6 +11,13 @@ function normalizeParamEntries(entries = []) {
   return entries.map((entry) => (entry?.params ? entry : { params: entry }));
 }
 
+/**
+ * รวม params จากหลายเซนเซอร์ (L/R)
+ *
+ * นับก้าว: รวม footfall ของแต่ละข้าง (sum) — ไม่ใช่ max ของค่าที่เคย ×2 สมมาตร
+ * Stride count: ใช้ max ต่อข้าง (จำนวนก้าวของขาที่เดินมากสุด)
+ * stepLength / stepTime / doubleSupport: null จนกว่าจะวัดจาก HS สองข้างจริง
+ */
 export function aggregateGaitParams(entries = []) {
   const normalizedEntries = normalizeParamEntries(entries);
   if (!normalizedEntries.length) {
@@ -25,7 +32,7 @@ export function aggregateGaitParams(entries = []) {
     stepTime: null,
     strideTime: 0,
     doubleSupport: null,
-    stepLength: 0,
+    stepLength: null,
     strideLength: 0,
     walkingSpeed: 0,
     clearance: 0,
@@ -38,7 +45,6 @@ export function aggregateGaitParams(entries = []) {
     'sessionDuration',
     'cadence',
     'strideTime',
-    'stepLength',
     'strideLength',
     'walkingSpeed',
     'clearance',
@@ -57,8 +63,23 @@ export function aggregateGaitParams(entries = []) {
       : (unresolvedIsMeaningful ? null : 0);
   });
 
-  averaged.stepCount = Math.max(...normalizedEntries.map((entry) => entry.params?.stepCount || 0));
-  averaged.strideCount = Math.max(...normalizedEntries.map((entry) => entry.params?.strideCount || 0));
+  // รวม footfall ที่แต่ละข้างวัดได้ (1 HS→HS ของขานั้น = 1)
+  averaged.stepCount = normalizedEntries.reduce(
+    (sum, entry) => sum + (Number.isFinite(entry.params?.stepCount) ? entry.params.stepCount : 0),
+    0,
+  );
+  averaged.strideCount = Math.max(
+    0,
+    ...normalizedEntries.map((entry) => entry.params?.strideCount || 0),
+  );
+
+  // ไม่เฉลี่ย step* / doubleSupport จากสูตรสมมาตร — คง null ถ้าทุกข้างเป็น null
+  const stepLengthValues = normalizedEntries
+    .map((entry) => entry.params?.stepLength)
+    .filter(Number.isFinite);
+  averaged.stepLength = stepLengthValues.length
+    ? stepLengthValues.reduce((sum, value) => sum + value, 0) / stepLengthValues.length
+    : null;
 
   const stepTimeValues = normalizedEntries
     .map((entry) => entry.params?.stepTime)
@@ -89,7 +110,7 @@ export function buildSessionSummaryFromAnalyzers(analyzers = []) {
 
   return {
     total_steps: summaries.length
-      ? Math.max(...summaries.map((summary) => summary.totalSteps || 0))
+      ? summaries.reduce((sum, summary) => sum + (summary.totalSteps || 0), 0)
       : 0,
     cadence_spm: averageValues(summaries.map((summary) => summary.cadenceSpm)) ?? 0,
     avg_step_length_m: averageValues(allRows.map((row) => row.step_length_m)) ?? 0,

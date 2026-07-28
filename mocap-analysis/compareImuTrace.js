@@ -1425,7 +1425,7 @@ export function compareMocapToImu(mocap, imuTrace, options = {}) {
       'Clearance ไม่เทียบอัตโนมัติ — MoCap วัดข้อเท้า, IMU double-integrate คนละตำแหน่ง',
       'Align: signal xcorr → HS-event; period alias โดยไม่มี coarse/--lag จะไม่จับคู่',
       'SOP แลป: heel-tap 1 ครั้งก่อนเดิน → ใส่ --lag; ยืนนิ่ง≥0.4s ก่อนเดินเพื่อ onset; ยืนยัน axis map',
-      'stepLength=stride/2 และ doubleSupport≈2·stance−100 สมมติสมมาตร L/R — พังกับ stroke',
+      'stepLength / stepTime / doubleSupport = null จากเซนเซอร์ข้างเดียว (ห้ามสมมติสมมาตร L/R)',
       'sum(stride) ต่อข้าง ≠ ระยะเดินจริงแบบ 1:1 ถ้าสองข้างบันทึกพร้อมกัน (อย่าบวก L+R)',
     ],
   };

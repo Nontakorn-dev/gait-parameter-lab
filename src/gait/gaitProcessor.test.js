@@ -53,12 +53,14 @@ function runStreaming({ numStrides, strideTime, analyzeEvery = 40 }) {
   return { allDiagnostics, totalStrideCount: proc.totalStrideCount };
 }
 
-test('นิยาม: stepLength === strideLength / 2 (integrate ตลอด HS→HS = 1 stride)', () => {
+test('นิยาม: 1 HS→HS = 1 stride = 1 footfall ของขาที่วัด — ไม่ ×2 สมมาตร', () => {
   const { params: p } = runPipeline();
   assert.ok(p, 'ต้องได้ params');
   assert.ok(Number.isFinite(p.strideLength), 'strideLength ต้องเป็นค่าจริงเสมอ (ไม่ null)');
-  assert.ok(Math.abs(p.stepLength - p.strideLength / 2) < 1e-9,
-    `stepLength=${p.stepLength} ควร = strideLength/2=${p.strideLength / 2}`);
+  assert.equal(p.stepCount, p.strideCount, 'เซนเซอร์ข้างเดียว: stepCount ต้องเท่า strideCount');
+  assert.equal(p.stepLength, null, 'stepLength ห้าม invent จาก stride/2');
+  assert.equal(p.stepTime, null, 'stepTime ห้าม invent จาก strideTime/2');
+  assert.equal(p.doubleSupport, null, 'doubleSupport ต้องมี HS สองข้าง — ไม่ใช้ 2·stance−100');
 });
 
 test('นิยาม: walkingSpeed === strideLength / strideTime', () => {
@@ -71,7 +73,7 @@ test('strideLength ขึ้นได้เกิน 0.80 (เพดาน step 
   const { params: p } = runPipeline({ stubStride: 1.4 });
   assert.ok(p.strideLength > 0.80, `strideLength=${p.strideLength} ต้องเกิน 0.80 ได้`);
   assert.ok(Math.abs(p.strideLength - 1.4) < 1e-9, 'ไม่ควรถูก clamp ที่เพดาน step เดิม');
-  assert.ok(Math.abs(p.stepLength - 0.7) < 1e-9, `stepLength=${p.stepLength} ควร = 0.7`);
+  assert.equal(p.stepLength, null);
 });
 
 test('เพดาน stride ใหม่ 1.80m: ค่าเกินถูก clamp ที่ 1.80 ไม่ใช่ 1.60', () => {
