@@ -1,0 +1,325 @@
+{
+  "ok": true,
+  "imuSource": "reprocess",
+  "warnings": [
+    "⛔ validationPublishable=false — ไม่มีข้างใดผ่าน agreement ที่ trusted (ดู sides[L|R].validationPublishable และ labChecklist); ใช้ --lab เพื่อบังคับ fail",
+    "MoCap sameSideRepeats=3 — event detection อาจพลาดฝั่งใดฝั่งหนึ่ง",
+    "ขา L: IMU มี 1/6 cycle ที่ stride ถูก clamp",
+    "ขา L: signal xcorr ใช้ไม่ได้ (weak-correlation) — ลอง HS-event lag (residual timing ไม่ใช่เมตริก detector bias)",
+    "ขา L: จับคู่ตามเวลาไม่ได้ — แสดงค่าเฉลี่ย session แบบ informational เท่านั้น (comparable=false; ห้ามใส่เปเปอร์)",
+    "ขา L: IMU มี 3 cycle ที่ stancePct=null (temporal unresolved)",
+    "ขา R: IMU มี 1/5 cycle ที่ stride ถูก clamp",
+    "ขา R: signal xcorr ใช้ไม่ได้ (weak-correlation) — ลอง HS-event lag (residual timing ไม่ใช่เมตริก detector bias)",
+    "ขา R: จับคู่ตามเวลาไม่ได้ — แสดงค่าเฉลี่ย session แบบ informational เท่านั้น (comparable=false; ห้ามใส่เปเปอร์)",
+    "ขา R: IMU มี 5 cycle ที่ stancePct=null (temporal unresolved)"
+  ],
+  "validationPublishable": false,
+  "validationPublishableBilateral": false,
+  "labChecklist": [
+    {
+      "id": "heel-tap-or-lag",
+      "ok": false,
+      "detail": "heel-tap 1 ครั้งก่อนเดิน + ใส่ --lag หรือมี onset/signal sync ที่ผ่าน"
+    },
+    {
+      "id": "paired-agreement-cycles",
+      "ok": false,
+      "detail": "อย่างน้อยหนึ่งข้างมี ≥3 คู่คุณภาพ (ดู sides[L|R].validationPublishable)"
+    },
+    {
+      "id": "no-synthetic-timestamps",
+      "ok": true,
+      "detail": "ทุก sample ต้องมี t_ms จาก firmware"
+    },
+    {
+      "id": "primary-metrics-only",
+      "ok": true,
+      "detail": "เคลมได้เฉพาะ strideLength / cadence / walkingSpeed — stance% และ peak° เป็น exploratory"
+    },
+    {
+      "id": "axis-map-verified",
+      "ok": null,
+      "detail": "ตรวจแกน L/R ด้วย swing test (ดูขั้ว gx ตอนแกว่งไปหน้า) — ไม่ auto-verify จาก signed stride"
+    }
+  ],
+  "sides": {
+    "L": {
+      "present": true,
+      "mocap": {
+        "cycleCount": 5,
+        "meanStrideLengthM": 0.5092389977960972,
+        "meanCadenceSpm": 69.55682567557763,
+        "meanWalkingSpeedMps": 0.27185176781576226,
+        "meanStancePct": 65.85299297447163,
+        "meanPeakShankAngleDeg": 25.503512376850132,
+        "meanAnkleClearanceM": 0.09310485799999998
+      },
+      "imu": {
+        "cycleCount": 6,
+        "meanStrideLengthM": 0.7725592872538484,
+        "meanCadenceSpm": 99.31993233358965,
+        "meanWalkingSpeedMps": 0.5872356827172671,
+        "meanStancePct": 46.54088050314467,
+        "meanPeakShankAngleDeg": 39.07683707344642,
+        "meanClearanceM": 0.24361302512920344,
+        "clampedCount": 1
+      },
+      "mocapAll": {
+        "cycleCount": 5,
+        "meanStrideLengthM": 0.5092389977960972,
+        "meanCadenceSpm": 69.55682567557763,
+        "meanWalkingSpeedMps": 0.27185176781576226,
+        "meanStancePct": 65.85299297447163,
+        "meanPeakShankAngleDeg": 25.503512376850132,
+        "meanAnkleClearanceM": 0.09310485799999998
+      },
+      "imuAll": {
+        "cycleCount": 6,
+        "meanStrideLengthM": 0.7725592872538484,
+        "meanCadenceSpm": 99.31993233358965,
+        "meanWalkingSpeedMps": 0.5872356827172671,
+        "meanStancePct": 46.54088050314467,
+        "meanPeakShankAngleDeg": 39.07683707344642,
+        "meanClearanceM": 0.24361302512920344,
+        "clampedCount": 1
+      },
+      "metrics": [
+        {
+          "metric": "strideLengthM",
+          "unit": "m",
+          "agreementClass": "primary",
+          "mocap": 0.5092389977960972,
+          "imu": 0.7725592872538484,
+          "error": null,
+          "errorPct": null,
+          "comparable": false,
+          "ineligibleReason": "pairing-not-trusted"
+        },
+        {
+          "metric": "cadenceSpm",
+          "unit": "spm",
+          "agreementClass": "primary",
+          "mocap": 69.55682567557763,
+          "imu": 99.31993233358965,
+          "error": null,
+          "errorPct": null,
+          "comparable": false,
+          "ineligibleReason": "pairing-not-trusted"
+        },
+        {
+          "metric": "walkingSpeedMps",
+          "unit": "m/s",
+          "agreementClass": "primary",
+          "mocap": 0.27185176781576226,
+          "imu": 0.5872356827172671,
+          "error": null,
+          "errorPct": null,
+          "comparable": false,
+          "ineligibleReason": "pairing-not-trusted"
+        },
+        {
+          "metric": "stancePct",
+          "unit": "%",
+          "agreementClass": "exploratory",
+          "mocap": 65.85299297447163,
+          "imu": 46.54088050314467,
+          "error": null,
+          "errorPct": null,
+          "comparable": false,
+          "ineligibleReason": "pairing-not-trusted"
+        },
+        {
+          "metric": "peakShankAngleDeg",
+          "unit": "deg",
+          "agreementClass": "exploratory",
+          "mocap": 25.503512376850132,
+          "imu": 39.07683707344642,
+          "error": null,
+          "errorPct": null,
+          "comparable": false,
+          "ineligibleReason": "pairing-not-trusted"
+        }
+      ],
+      "cycleCountDelta": 1,
+      "agreementPairCount": 0,
+      "excludedPairCount": 0,
+      "validationPublishable": false,
+      "alignment": {
+        "mode": "session-mean-informational",
+        "lagS": 0,
+        "lagSource": "hs-event",
+        "lagOk": false,
+        "syncTrusted": false,
+        "coarseLagS": 0,
+        "coarseFromOnset": false,
+        "signalPeakCorr": null,
+        "peakCorrMinus": 0.30684094628096203,
+        "polarityIndeterminate": false,
+        "systematicUncertaintyS": 0.003,
+        "pairedCount": 0,
+        "agreementPairCount": 0,
+        "unpairedMocap": 5,
+        "unpairedImu": 6,
+        "timingMetricValid": false,
+        "periodAliasRisk": false,
+        "meanTimeErrorS": null,
+        "medianTimeErrorS": null
+      }
+    },
+    "R": {
+      "present": true,
+      "mocap": {
+        "cycleCount": 3,
+        "meanStrideLengthM": 0.5952107766253475,
+        "meanCadenceSpm": 74.08926069410369,
+        "meanWalkingSpeedMps": 0.34917464425030875,
+        "meanStancePct": 62.3320332200532,
+        "meanPeakShankAngleDeg": 28.101233891874287,
+        "meanAnkleClearanceM": 0.07120238333333333
+      },
+      "imu": {
+        "cycleCount": 5,
+        "meanStrideLengthM": 0.6921294461358887,
+        "meanCadenceSpm": 76.98464199397536,
+        "meanWalkingSpeedMps": 0.49418359517305444,
+        "meanStancePct": null,
+        "meanPeakShankAngleDeg": 34.987905406476685,
+        "meanClearanceM": 0.18755705285325516,
+        "clampedCount": 1
+      },
+      "mocapAll": {
+        "cycleCount": 3,
+        "meanStrideLengthM": 0.5952107766253475,
+        "meanCadenceSpm": 74.08926069410369,
+        "meanWalkingSpeedMps": 0.34917464425030875,
+        "meanStancePct": 62.3320332200532,
+        "meanPeakShankAngleDeg": 28.101233891874287,
+        "meanAnkleClearanceM": 0.07120238333333333
+      },
+      "imuAll": {
+        "cycleCount": 5,
+        "meanStrideLengthM": 0.6921294461358887,
+        "meanCadenceSpm": 76.98464199397536,
+        "meanWalkingSpeedMps": 0.49418359517305444,
+        "meanStancePct": null,
+        "meanPeakShankAngleDeg": 34.987905406476685,
+        "meanClearanceM": 0.18755705285325516,
+        "clampedCount": 1
+      },
+      "metrics": [
+        {
+          "metric": "strideLengthM",
+          "unit": "m",
+          "agreementClass": "primary",
+          "mocap": 0.5952107766253475,
+          "imu": 0.6921294461358887,
+          "error": null,
+          "errorPct": null,
+          "comparable": false,
+          "ineligibleReason": "pairing-not-trusted"
+        },
+        {
+          "metric": "cadenceSpm",
+          "unit": "spm",
+          "agreementClass": "primary",
+          "mocap": 74.08926069410369,
+          "imu": 76.98464199397536,
+          "error": null,
+          "errorPct": null,
+          "comparable": false,
+          "ineligibleReason": "pairing-not-trusted"
+        },
+        {
+          "metric": "walkingSpeedMps",
+          "unit": "m/s",
+          "agreementClass": "primary",
+          "mocap": 0.34917464425030875,
+          "imu": 0.49418359517305444,
+          "error": null,
+          "errorPct": null,
+          "comparable": false,
+          "ineligibleReason": "pairing-not-trusted"
+        },
+        {
+          "metric": "stancePct",
+          "unit": "%",
+          "agreementClass": "exploratory",
+          "mocap": 62.3320332200532,
+          "imu": null,
+          "error": null,
+          "errorPct": null,
+          "comparable": false,
+          "ineligibleReason": "pairing-not-trusted"
+        },
+        {
+          "metric": "peakShankAngleDeg",
+          "unit": "deg",
+          "agreementClass": "exploratory",
+          "mocap": 28.101233891874287,
+          "imu": 34.987905406476685,
+          "error": null,
+          "errorPct": null,
+          "comparable": false,
+          "ineligibleReason": "pairing-not-trusted"
+        }
+      ],
+      "cycleCountDelta": 2,
+      "agreementPairCount": 0,
+      "excludedPairCount": 0,
+      "validationPublishable": false,
+      "alignment": {
+        "mode": "session-mean-informational",
+        "lagS": 0,
+        "lagSource": "hs-event",
+        "lagOk": false,
+        "syncTrusted": false,
+        "coarseLagS": 0,
+        "coarseFromOnset": false,
+        "signalPeakCorr": null,
+        "peakCorrMinus": 0.33016565158981676,
+        "polarityIndeterminate": false,
+        "systematicUncertaintyS": 0.003,
+        "pairedCount": 0,
+        "agreementPairCount": 0,
+        "unpairedMocap": 3,
+        "unpairedImu": 5,
+        "timingMetricValid": false,
+        "periodAliasRisk": false,
+        "meanTimeErrorS": null,
+        "medianTimeErrorS": null
+      }
+    }
+  },
+  "session": {
+    "mocapPelvisNetForwardM": 0.03104788163209558,
+    "mocapDurationS": 12.03333333,
+    "mocapTrueCadenceSpm": 59.786476868327405,
+    "imuGroundTruthDistanceM": 5,
+    "imuSampleCount": 13690,
+    "imuCycleCountInFile": 13,
+    "distanceBySide": {
+      "L": {
+        "imuSumStrideLengthM": 3.862796436269242,
+        "mocapMeanStrideLengthM": 0.5092389977960972,
+        "vsMocapPelvisNetPct": 12341.417041077924,
+        "vsGroundTruthPct": -22.74407127461516
+      },
+      "R": {
+        "imuSumStrideLengthM": 3.4606472306794434,
+        "mocapMeanStrideLengthM": 0.5952107766253475,
+        "vsMocapPelvisNetPct": 11046.162149439588,
+        "vsGroundTruthPct": -30.787055386411133
+      }
+    }
+  },
+  "notes": [
+    "validationPublishable=true เท่านั้นถึงจะเอา primary error% ไปใช้ในเปเปอร์ — มิฉะนั้นเป็น informational",
+    "Primary agreement: strideLength / cadence / walkingSpeed หลังจับคู่+กรองคุณภาพ",
+    "Exploratory (comparable=false): stancePct (คนละนิยาม event), peakShankAngleDeg (mounting offset)",
+    "Clearance ไม่เทียบอัตโนมัติ — MoCap วัดข้อเท้า, IMU double-integrate คนละตำแหน่ง",
+    "Align: signal xcorr → HS-event; period alias โดยไม่มี coarse/--lag จะไม่จับคู่",
+    "SOP แลป: heel-tap 1 ครั้งก่อนเดิน → ใส่ --lag; ยืนนิ่ง≥0.4s ก่อนเดินเพื่อ onset; ยืนยัน axis map",
+    "stepLength / stepTime / doubleSupport = null จากเซนเซอร์ข้างเดียว (ห้ามสมมติสมมาตร L/R)",
+    "sum(stride) ต่อข้าง ≠ ระยะเดินจริงแบบ 1:1 ถ้าสองข้างบันทึกพร้อมกัน (อย่าบวก L+R)"
+  ]
+}

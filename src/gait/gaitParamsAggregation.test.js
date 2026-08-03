@@ -1,7 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 
-import { aggregateGaitParams } from './gaitParamsAggregation.js';
+import { aggregateGaitParams, normalizeParamEntries } from './gaitParamsAggregation.js';
 
 test('aggregate: เซนเซอร์ข้างเดียว — stepCount = strideCount (ไม่ ×2)', () => {
   const averaged = aggregateGaitParams([
@@ -21,4 +21,19 @@ test('aggregate: สองข้าง — stepCount = รวม footfall ทั
   assert.equal(averaged.stepCount, 19, 'ต้องรวม L+R ไม่ใช่ max');
   assert.equal(averaged.strideCount, 10, 'stride ใช้ max ต่อข้าง');
   assert.equal(averaged.stepLength, null);
+});
+
+test('🔴 normalizeParamEntries: params=null ถูกกรอง ไม่ห่อทั้ง entry เป็น params', () => {
+  const out = normalizeParamEntries([
+    { key: 'L', params: { stepCount: 9, cadence: 61 } },
+    { key: 'R', params: null },
+  ]);
+  assert.equal(out.length, 1);
+  assert.equal(out[0].params.stepCount, 9);
+  const avg = aggregateGaitParams([
+    { key: 'L', params: { stepCount: 9, strideCount: 9, strideLength: 0.71, cadence: 61 } },
+    { key: 'R', params: null },
+  ]);
+  assert.equal(avg.stepCount, 9, 'ห้ามนับ 0 จากข้างที่ params=null');
+  assert.ok(Math.abs(avg.strideLength - 0.71) < 1e-9);
 });

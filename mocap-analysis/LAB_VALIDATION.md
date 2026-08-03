@@ -4,13 +4,17 @@
 
 ## Pilot แรก (สำคัญกว่า agreement ทีละก้าว)
 
-ก่อนจองห้องเต็มชุด — เดินตรง **วัดระยะจริง 10 m** แล้วเทียบ `Σ strideLength` (หรือ `groundTruth.distanceM` ใน trace) กับ 10 m
+ก่อนจองห้องเต็มชุด — เดินตรง **วัดระยะจริง 10 m** แล้วเทียบ **`Σ strideLength clean`**
+(`imuSumStrideLengthCleanM` / `sumStrideLengthCleanM` — ตัด clamp / untrusted / open / suspected-missed-HS)
+กับ 10 m ผ่าน `groundTruth.distanceM` ใน trace
 
-| ผล Σ stride | ความหมาย |
-|-------------|----------|
+| ผล Σ clean | ความหมาย |
+|------------|----------|
 | ~8–12 m | ขยายไป MoCap agreement ได้ |
 | ~1–2 m | double-integration พังบนข้อมูลจริง — หยุด; อย่าเก็บชุดใหญ่ |
 | ติดลบเป็นระบบ | แกน/ขั้วผิด — ทำ swing test ใหม่ |
+
+อย่าใช้ `imuSumStrideLengthM` (รวม clamp) เป็น pilot gate — ค่าเพดาน 1.80 m จะดึง % error หลอก
 
 อย่าใช้ `strideLengthSignedM` เป็น auto-gate ของ axis map (residual จาก integration ทำให้ฟ้องเท็จได้) — ใช้ **swing test ด้วยมือ** ข้อ 2
 

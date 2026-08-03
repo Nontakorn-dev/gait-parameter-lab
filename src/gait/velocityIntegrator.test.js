@@ -22,13 +22,12 @@ test('computeStrideMetrics ใช้ options.dt: strideLength scale ตาม dt
   const b = integ.computeStrideMetrics(ay, az, angles, { ...opts, dt: 0.02 });
 
   assert.ok(a.strideLength > 0, 'ต้องได้ระยะทาง > 0');
-  // dt สองเท่า → displacement ~สี่เท่า
   const ratio = b.strideLength / a.strideLength;
   assert.ok(Math.abs(ratio - 4) < 1e-6, `ratio ควร ~4 ได้ ${ratio}`);
 });
 
 test('computeStrideMetrics fallback เป็น nominal dt เมื่อไม่ส่ง options.dt', () => {
-  const integ = new VelocityIntegrator({ sampleRate: 100 }); // this.dt = 0.01
+  const integ = new VelocityIntegrator({ sampleRate: 100 });
   const { ay, az, angles } = buildSignal();
   const opts = { integrationStartIdx: 0, integrationEndIdx: az.length - 1 };
 
@@ -38,26 +37,49 @@ test('computeStrideMetrics fallback เป็น nominal dt เมื่อไ�
   assert.ok(Math.abs(noDt.strideLength - explicit.strideLength) < 1e-9);
 });
 
-test('velocityPreDriftCorrection: ต่างจาก velocity (post-correction) เมื่อปลายสัญญาณไม่นิ่ง', () => {
+test('start-only ZUPT จริง: มี pre-window → vStartPreDrift วัดได้ และปลายไม่ถูกบังคับ 0', () => {
   const integ = new VelocityIntegrator({ sampleRate: 100 });
-  const { ay, az, angles } = buildSignal();
-  const { velocity, velocityPreDriftCorrection } = integ.computeStrideMetrics(
+  // pre: เร่งคงที่ → สะสม v ก่อนเข้า window; window: เร่งต่อ
+  const az = [2, 2, 2, 2, 2, 2, 2, 2];
+  const ay = az.map(() => -G);
+  const angles = az.map(() => 0);
+  const { velocity, velocityPreDriftCorrection, vStartPreDrift, vEndPreDrift } = integ.computeStrideMetrics(
     ay, az, angles,
-    { integrationStartIdx: 0, integrationEndIdx: az.length - 1, dt: 0.01 },
+    { integrationStartIdx: 3, integrationEndIdx: az.length - 1, dt: 0.01 },
   );
 
+  assert.ok(Math.abs(vStartPreDrift) > 0.01, `vStart ก่อนรีเซ็ตต้อง ≠ 0 ได้ ${vStartPreDrift}`);
+  assert.ok(Math.abs(velocity[0]) < 1e-9, 'หลัง start-only: v ที่ต้น window = 0');
+  assert.ok(Math.abs(velocity[velocity.length - 1]) > 0.01, 'ปลายไม่ถูกบังคับ 0');
   assert.equal(velocityPreDriftCorrection.length, velocity.length);
-  // start-only ZUPT: บังคับ v=0 ที่ต้น ไม่บังคับปลาย (shank มักยังไม่นิ่ง)
-  assert.ok(Math.abs(velocity[0]) < 1e-9, 'post-correction v เริ่มต้องเป็น 0');
-  assert.ok(
-    Math.abs(velocity[velocity.length - 1] - (
-      velocityPreDriftCorrection[velocityPreDriftCorrection.length - 1]
-      - velocityPreDriftCorrection[0]
-    )) < 1e-9,
-    'ปลายหลังแก้ = pre − vStart',
-  );
-  assert.notEqual(velocityPreDriftCorrection[velocityPreDriftCorrection.length - 1], 0,
-    'pre-correction v ปลายไม่ควรเป็น 0 พอดี (สัญญาณทดสอบมี drift จริง)');
+  assert.ok(Math.abs(vEndPreDrift - velocityPreDriftCorrection.at(-1)) < 1e-9);
+});
+
+test('start-only ที่ integrationStartIdx=0 ไม่ใช่ no-op ปลอมของ diagnostic: vStart=0 โดยสมมติ ZUPT', () => {
+  const integ = new VelocityIntegrator({ sampleRate: 100 });
+  const { ay, az, angles } = buildSignal();
+  const r = integ.computeStrideMetrics(ay, az, angles, {
+    integrationStartIdx: 0,
+    integrationEndIdx: az.length - 1,
+    dt: 0.01,
+  });
+  assert.ok(Math.abs(r.vStartPreDrift) < 1e-9);
+  assert.ok(Math.abs(r.velocity[0]) < 1e-9);
+  // ปลายยังมี residual (ไม่มี dual-end forcing)
+  assert.notEqual(r.velocity[r.velocity.length - 1], 0);
+});
+
+test('driftMode start-end: บังคับปลายเป็น 0', () => {
+  const integ = new VelocityIntegrator({ sampleRate: 100, driftMode: 'start-end' });
+  const { ay, az, angles } = buildSignal();
+  const { velocity } = integ.computeStrideMetrics(ay, az, angles, {
+    integrationStartIdx: 0,
+    integrationEndIdx: az.length - 1,
+    dt: 0.01,
+    driftMode: 'start-end',
+  });
+  assert.ok(Math.abs(velocity[0]) < 1e-9);
+  assert.ok(Math.abs(velocity[velocity.length - 1]) < 1e-9);
 });
 
 test('velocityPreDriftCorrection ว่างเปล่าเมื่อ window สั้นเกินไป (< 2 samples)', () => {

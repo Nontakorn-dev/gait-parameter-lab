@@ -6,6 +6,9 @@ export class VelocityIntegrator {
     this.sampleRate = options.sampleRate || 100;
     this.dt = 1.0 / this.sampleRate;
     this.gravity = options.gravity || 9.81;
+    // 'start-only' = บังคับ v=0 ที่ integrationStart (ZUPT ต้น window) ไม่บังคับปลาย
+    // 'start-end'  = linear bridge ให้ v_end=0 ด้วย (classic dual ZUPT)
+    this.driftMode = options.driftMode === 'start-end' ? 'start-end' : 'start-only';
   }
 
   sensorToWorld(ay, az, angle) {
@@ -20,16 +23,21 @@ export class VelocityIntegrator {
   }
 
   /**
-   * @param {number[]} ayArray  m/s²
+   * @param {number[]} ayArray  m/s² — ควรคลุมช่วงก่อน integrationStart (เช่น จาก HS)
    * @param {number[]} azArray  m/s²
    * @param {number[]} angles   deg (1D sagittal) — ใช้เมื่อไม่มี quaternions
    * @param {object} [options]
-   * @param {number[]} [options.axArray]  m/s² — จำเป็นเมื่อใช้ Madgwick quat
+   * @param {number} [options.integrationStartIdx=0] index ใน array ที่เชื่อว่า ZUPT (quiet หลัง HS)
+   * @param {number} [options.integrationEndIdx]
+   * @param {number[]} [options.axArray]
    * @param {Array<{q0,q1,q2,q3}>} [options.quaternions]
+   * @param {'start-only'|'start-end'} [options.driftMode]
    */
   computeStrideMetrics(ayArray, azArray, angles, options = {}) {
-    // ใช้ dt จริงจาก timestamp เมื่อส่งมา (ทนต่อ dropped sample) ไม่งั้น fallback เป็น nominal
     const dt = Number.isFinite(options.dt) && options.dt > 0 ? options.dt : this.dt;
+    const driftMode = options.driftMode === 'start-end' || options.driftMode === 'start-only'
+      ? options.driftMode
+      : this.driftMode;
     const sampleCount = ayArray.length;
     if (sampleCount < 2) {
       return {
@@ -41,6 +49,8 @@ export class VelocityIntegrator {
         displacement: [],
         verticalVelocity: [],
         verticalDisplacement: [],
+        vStartPreDrift: null,
+        vEndPreDrift: null,
       };
     }
 
@@ -75,32 +85,27 @@ export class VelocityIntegrator {
       }
     }
 
-    const swingHoriz = [];
-    const swingVert = [];
+    // Integrate จากต้น segment (มักเป็น HS) → ได้ความเร็วสะสมก่อนเข้า window
+    // แล้วรีเซ็ตที่ integrationStartIdx (= ZUPT ต้น quiet) — นี่คือ start-only จริง
+    // ห้าม trapz เฉพาะ window แล้วลบ velocity[0] เพราะ trapz ตั้ง [0]=0 ตายตัว → no-op
+    const velFull = trapezoidalIntegrate(aHoriz.slice(0, integrationEndIdx + 1), dt);
+    const vertFull = trapezoidalIntegrate(aVertLinear.slice(0, integrationEndIdx + 1), dt);
+
+    const vStartPreDrift = velFull[integrationStartIdx];
+    const velocityPreDriftCorrection = [];
     for (let i = integrationStartIdx; i <= integrationEndIdx; i += 1) {
-      swingHoriz.push(aHoriz[i]);
-      swingVert.push(aVertLinear[i]);
+      velocityPreDriftCorrection.push(velFull[i]);
     }
+    const vEndPreDrift = velocityPreDriftCorrection[velocityPreDriftCorrection.length - 1];
 
-    if (swingHoriz.length < 2) {
-      return {
-        strideLength: 0,
-        strideLengthSigned: 0,
-        clearance: 0,
-        velocity: [],
-        velocityPreDriftCorrection: [],
-        displacement: [],
-        verticalVelocity: [],
-        verticalDisplacement: [],
-      };
-    }
-
-    const velocityPreDriftCorrection = trapezoidalIntegrate(swingHoriz, dt);
-    const velocity = this.correctDrift(velocityPreDriftCorrection);
+    const velocity = this.applyDriftCorrection(velocityPreDriftCorrection, driftMode);
     const displacement = trapezoidalIntegrate(velocity, dt);
 
-    let verticalVelocity = trapezoidalIntegrate(swingVert, dt);
-    verticalVelocity = this.correctDrift(verticalVelocity);
+    const verticalPre = [];
+    for (let i = integrationStartIdx; i <= integrationEndIdx; i += 1) {
+      verticalPre.push(vertFull[i]);
+    }
+    let verticalVelocity = this.applyDriftCorrection(verticalPre, driftMode);
     const verticalDisplacement = trapezoidalIntegrate(verticalVelocity, dt);
 
     let minVertical = Infinity;
@@ -123,25 +128,44 @@ export class VelocityIntegrator {
       displacement,
       verticalVelocity,
       verticalDisplacement,
+      vStartPreDrift: Number.isFinite(vStartPreDrift) ? vStartPreDrift : null,
+      vEndPreDrift: Number.isFinite(vEndPreDrift) ? vEndPreDrift : null,
     };
   }
 
-  correctDrift(velocity) {
-    const sampleCount = velocity.length;
+  /**
+   * @param {number[]} velocityPre  ความเร็วสะสมดิบในช่วง window (index 0 = จุด ZUPT ต้น)
+   * @param {'start-only'|'start-end'} driftMode
+   */
+  applyDriftCorrection(velocityPre, driftMode = 'start-only') {
+    const sampleCount = velocityPre.length;
     if (sampleCount < 2) {
-      return velocity;
+      return velocityPre.slice();
     }
 
-    // ZUPT ที่ปลายสองด้านสมมติแรงเกินไปบน shank: ช่วงปลาย window มักยังไม่นิ่งจริง
-    // (|v_end| ค้าง) การลบ linear ramp ไปหา v_end=0 จะตัดความเร็วจริง → ระยะสั้น ~20%
-    // บน walk 3 m จริง. รีเซ็ตแค่ v_start (หลัง HS / ต้น quiet) ซึ่งเชื่อถือได้กว่า
-    // เก็บ velocityPreDriftCorrection ไว้ดู |v_end| เป็น quality gate แยก
-    const vStart = velocity[0];
+    // บังคับ v=0 ที่ต้น window (จุดที่เชื่อว่า stance quiet)
+    const vStart = velocityPre[0];
+    const startZeroed = new Array(sampleCount);
+    for (let i = 0; i < sampleCount; i += 1) {
+      startZeroed[i] = velocityPre[i] - vStart;
+    }
+
+    if (driftMode !== 'start-end') {
+      return startZeroed;
+    }
+
+    // Classic dual ZUPT: ลบ linear ramp ให้ปลายเป็น 0 ด้วย
+    const vEnd = startZeroed[sampleCount - 1];
+    const driftPerSample = vEnd / (sampleCount - 1);
     const corrected = new Array(sampleCount);
     for (let i = 0; i < sampleCount; i += 1) {
-      corrected[i] = velocity[i] - vStart;
+      corrected[i] = startZeroed[i] - driftPerSample * i;
     }
-
     return corrected;
+  }
+
+  /** @deprecated ใช้ applyDriftCorrection — เก็บชื่อเดิมให้เทสต์เก่าที่เรียตรง */
+  correctDrift(velocity) {
+    return this.applyDriftCorrection(velocity, 'start-only');
   }
 }

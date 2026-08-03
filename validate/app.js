@@ -414,17 +414,20 @@ function renderGroundTruth(data) {
     distanceHtml = `<div class="distance-check">
       ${check.perSensor
         .map((p) => {
-          const hasGap = p.noDataCount > 0;
+          const hasGap = p.noDataCount > 0 || p.hasCoverageGap;
           // sum ที่ขาด cycle ไปทำให้ errorPct เพี้ยนไปทางลบเกินจริงเสมอ (นับน้อยกว่าที่เดินจริง)
           // สีปกติ (ok/warn/bad) จะดูน่าเชื่อถือเกินจริงทั้งที่ตัวเลขไม่ครบ จึงบังคับเป็นสีเทา + ⚠️ แทน
-          const cls = hasGap ? "unreliable" : distanceCheckClass(p.errorPct);
+          const cls = hasGap || !Number.isFinite(p.errorPct) ? "unreliable" : distanceCheckClass(p.errorPct);
           const valuePrefix = hasGap ? "⚠️ " : "";
-          const noDataNote = hasGap
+          const noDataNote = p.noDataCount > 0
             ? ` <span class="flag-bad">(${p.noDataCount} cycle ไม่มีข้อมูล — ไม่รวมใน sum, error% นี้ไม่น่าเชื่อถือ)</span>`
             : "";
+          const coverageNote = p.hasCoverageGap
+            ? ` <span class="flag-bad">(coverage gap ${formatNum(p.coverageGapS, 2)}s — ขาด stride หลังแยก merged HS; distance gate ปฏิเสธ)</span>`
+            : "";
           return `<div class="distance-check__stat">
-            <div class="distance-check__value ${cls}">${valuePrefix}${formatSigned(p.errorPct, 1)}%</div>
-            <div class="distance-check__label">${sensorLabel(p.sensorKey, p.side)} · sum ${formatNum(p.sumStrideLengthM, 2)}m / ${p.cycleCount} cycles${noDataNote}</div>
+            <div class="distance-check__value ${cls}">${valuePrefix}${Number.isFinite(p.errorPct) ? `${formatSigned(p.errorPct, 1)}%` : "—"}</div>
+            <div class="distance-check__label">${sensorLabel(p.sensorKey, p.side)} · clean ${formatNum(p.sumStrideLengthCleanM, 2)}m / ${p.cycleCount} cycles${noDataNote}${coverageNote}</div>
           </div>`;
         })
         .join("")}
@@ -582,9 +585,14 @@ function renderMocapOnly() {
     <div class="fact-grid" style="margin-bottom:14px;">
       ${fact("File", state.mocapFileName || "—")}
       ${fact("Duration", Number.isFinite(m.session?.durationS) ? `${formatNum(m.session.durationS, 1)} s` : "—")}
-      ${fact("Pelvis net forward", Number.isFinite(m.session?.pelvisNetForwardDisplacementM) ? `${formatNum(m.session.pelvisNetForwardDisplacementM, 3)} m` : "—")}
-      ${fact("Bilateral cadence", Number.isFinite(m.bilateral?.trueCadenceSpm) ? `${formatNum(m.bilateral.trueCadenceSpm, 1)} spm` : "—")}
+      ${fact("Pelvis net forward", m.session?.pelvisNetMeaningful === false
+        ? `n/a (${m.session?.forwardAxisMethod || "out-and-back"}; max ${formatNum(m.session?.pelvisMaxExcursionM, 2)} m)`
+        : (Number.isFinite(m.session?.pelvisNetForwardDisplacementM) ? `${formatNum(m.session.pelvisNetForwardDisplacementM, 3)} m` : "—"))}
+      ${fact("Bilateral cadence", m.bilateral?.reliable === false
+        ? `hidden (sameSideRepeats=${formatNum(m.bilateral?.sameSideRepeats ?? 0, 0)})`
+        : (Number.isFinite(m.bilateral?.trueCadenceSpm) ? `${formatNum(m.bilateral.trueCadenceSpm, 1)} spm` : "—"))}
       ${fact("sameSideRepeats", formatNum(m.bilateral?.sameSideRepeats ?? 0, 0))}
+      ${fact("bilateral.reliable", m.bilateral?.reliable === false ? "false" : "true")}
     </div>
     <table class="sensor-table">
       <thead>
@@ -684,9 +692,14 @@ function renderCompareReport(report) {
     .map((side) => {
       const d = session.distanceBySide?.[side];
       if (!d || !Number.isFinite(d.imuSumStrideLengthM)) return "";
+      const clean = Number.isFinite(d.imuSumStrideLengthCleanM) ? d.imuSumStrideLengthCleanM : null;
       return `<tr>
         <td>${sideBadgeHtml(side)}${side}</td>
-        <td>${formatNum(d.imuSumStrideLengthM, 3)} m</td>
+        <td>${formatNum(d.imuSumStrideLengthM, 3)} m`
+        + (clean != null && clean !== d.imuSumStrideLengthM
+          ? ` <span class="muted">(clean ${formatNum(clean, 3)})</span>`
+          : "")
+        + `</td>
         <td class="${errorPctClass(d.vsMocapPelvisNetPct)}">${Number.isFinite(d.vsMocapPelvisNetPct) ? formatSigned(d.vsMocapPelvisNetPct, 1) + "%" : "—"}</td>
         <td class="${errorPctClass(d.vsGroundTruthPct)}">${Number.isFinite(d.vsGroundTruthPct) ? formatSigned(d.vsGroundTruthPct, 1) + "%" : "—"}</td>
       </tr>`;
@@ -706,10 +719,10 @@ function renderCompareReport(report) {
       ${sideCompareHtml("R", report.sides.R)}
     </div>
     <div style="margin-top:18px;">
-      <div class="card-title" style="margin-bottom:10px;">Distance check (sum stride ต่อข้าง)</div>
+      <div class="card-title" style="margin-bottom:10px;">Distance check (Σ stride ต่อข้าง — gate ใช้ clean)</div>
       <table class="sensor-table">
         <thead>
-          <tr><th>Side</th><th>IMU Σ stride</th><th>vs MoCap net</th><th>vs IMU GT dist</th></tr>
+          <tr><th>Side</th><th>IMU Σ stride (clean)</th><th>vs MoCap net</th><th>vs IMU GT dist</th></tr>
         </thead>
         <tbody>${distanceRows || `<tr><td colspan="4" class="fact-value muted">ไม่มีข้อมูล</td></tr>`}</tbody>
       </table>

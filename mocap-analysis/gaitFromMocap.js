@@ -5,8 +5,9 @@
 // การเคลื่อนที่ของข้อเท้าโดยตรง ไม่ได้ใช้ GaitEventDetector ของ IMU pipeline
 // (หลีกเลี่ยง shared blind spot)
 //
-// Pipeline ความเร็ว: Butterworth low-pass zero-lag (default 6 Hz) บนตำแหน่ง → แล้วค่อย
-// central-difference — จำเป็นเพราะ differentiate ขยาย marker noise ด้วย ~1/(2·dt)
+// Pipeline ความเร็ว + มุมหน้าแข้ง: Butterworth low-pass zero-lag (default 6 Hz)
+// บนตำแหน่ง / shank angle → แล้วค่อย central-difference — จำเป็นเพราะ differentiate
+// ขยาย marker noise ด้วย ~1/(2·dt). shankAngularVelocityDps (หลังกรอง) ใช้ signal xcorr sync
 //
 // ⚠️ ข้อจำกัดที่ยังมี:
 //   - ไม่มี marker ปลายเท้า/heel → ใช้ข้อเท้าแทน (TO = "เท้าเริ่มขยับ" ไม่ใช่ toe-off เป๊ะ)
@@ -16,11 +17,14 @@
 import { rad2deg } from '../src/gait/signalUtils.js';
 import { minFinite, maxFinite } from '../src/util/finiteStats.js';
 import { extractMarkerSeries, interpolateGaps } from './parseOptiTrack.js';
+import { filtfiltButterworth2, estimateSampleRateHz } from './butterworth.js';
+import { pickAnkleRolePlan } from './markerRoles.js';
 import {
   computeForwardPosition,
   computeFilteredVelocity,
   detectStanceIntervals,
   buildCyclesFromStanceIntervals,
+  DEFAULT_POSITION_CUTOFF_HZ,
 } from './velocityEventDetector.js';
 
 function dot2(ax, az, bx, bz) {
@@ -95,7 +99,8 @@ export function assertAndNormalizeCaptureUnits(seriesByRole, options = {}) {
         + `${rangeX.toFixed(3)}/${rangeY.toFixed(3)}/${rangeZ.toFixed(3)}) `
         + '— คาดหวัง Y เป็นแนวดิ่ง (OptiTrack default). ถ้า capture เป็น Z-up '
         + 'ankleClearance/มุมหน้าแข้งจะผิดหมด';
-      if (options.strictVerticalAxis) {
+      // แพทย์/แลป: strict เป็น default — opt-out ด้วย strictVerticalAxis:false
+      if (options.strictVerticalAxis !== false) {
         throw new Error(msg);
       }
       warnings.push(msg);
@@ -120,31 +125,102 @@ export function assertAndNormalizeCaptureUnits(seriesByRole, options = {}) {
   return { seriesByRole: normalized, unitScale, warnings, meanAsisY: meanY, ranges: { rangeX, rangeY, rangeZ } };
 }
 
-// แกนเดินหลัก (forward) จาก midpoint ของ ASIS สองข้าง — สมมติเดินเส้นตรง (ไม่เลี้ยว)
-// ใช้ระยะจากจุดแรกไปจุดสุดท้ายในแนวราบ (X,Z; Y เป็นแนวดิ่งตาม OptiTrack default)
+// แกนเดินหลัก (forward) จาก midpoint ของ ASIS สองข้างในแนวราบ (X,Z; Y = ดิ่ง)
+// 1) ถ้าไป-จุดสุดท้ายสุทธิ ≥ 0.3 m ใช้ทิศนั้น
+// 2) ถ้าไป-กลับ (net เล็ก) ใช้ทิศไปจุดที่ห่างจากจุดเริ่มมากสุด
+// 3) fallback: PCA บน (x,z) ของ pelvis
 export function computeForwardAxis(pelvisX, pelvisZ) {
-  let firstIdx = -1;
-  let lastIdx = -1;
+  const pts = [];
   for (let i = 0; i < pelvisX.length; i += 1) {
-    if (pelvisX[i] !== null) {
-      if (firstIdx === -1) firstIdx = i;
-      lastIdx = i;
+    if (pelvisX[i] !== null && pelvisZ[i] !== null) {
+      pts.push({ i, x: pelvisX[i], z: pelvisZ[i] });
     }
   }
-  if (firstIdx === -1 || firstIdx === lastIdx) {
+  if (pts.length < 2) {
     throw new Error('หาแกนทิศทางเดินไม่ได้: ASIS midpoint ไม่มีข้อมูลพอ (อาจถูกบดบังทั้งเฟรม)');
   }
 
-  const dx = pelvisX[lastIdx] - pelvisX[firstIdx];
-  const dz = pelvisZ[lastIdx] - pelvisZ[firstIdx];
-  const mag = Math.sqrt(dx * dx + dz * dz);
-  if (mag < 0.3) {
+  const first = pts[0];
+  const last = pts[pts.length - 1];
+  const netDx = last.x - first.x;
+  const netDz = last.z - first.z;
+  const netMag = Math.sqrt(netDx * netDx + netDz * netDz);
+
+  let maxExcursionM = 0;
+  let far = first;
+  for (const p of pts) {
+    const d = Math.sqrt((p.x - first.x) ** 2 + (p.z - first.z) ** 2);
+    if (d > maxExcursionM) {
+      maxExcursionM = d;
+      far = p;
+    }
+  }
+
+  const finish = (fx, fz, method, netDisplacementM) => {
+    const mag = Math.sqrt(fx * fx + fz * fz);
+    if (!(mag > 1e-9)) {
+      throw new Error('หาแกนทิศทางเดินไม่ได้: ทิศที่ได้มีความยาวศูนย์');
+    }
+    return {
+      fx: fx / mag,
+      fz: fz / mag,
+      netDisplacementM,
+      maxExcursionM,
+      method,
+    };
+  };
+
+  if (netMag >= 0.3) {
+    return finish(netDx, netDz, 'net-start-end', netMag);
+  }
+
+  if (maxExcursionM >= 0.3) {
+    return finish(far.x - first.x, far.z - first.z, 'max-excursion', netMag);
+  }
+
+  // PCA 2D
+  let mx = 0;
+  let mz = 0;
+  for (const p of pts) {
+    mx += p.x;
+    mz += p.z;
+  }
+  mx /= pts.length;
+  mz /= pts.length;
+  let cxx = 0;
+  let czz = 0;
+  let cxz = 0;
+  for (const p of pts) {
+    const dx = p.x - mx;
+    const dz = p.z - mz;
+    cxx += dx * dx;
+    czz += dz * dz;
+    cxz += dx * dz;
+  }
+  // eigenvector of larger eigenvalue
+  const trace = cxx + czz;
+  const det = cxx * czz - cxz * cxz;
+  const disc = Math.sqrt(Math.max(0, (trace * trace) / 4 - det));
+  const eig1 = trace / 2 + disc;
+  let fx = eig1 - czz;
+  let fz = cxz;
+  if (Math.abs(fx) + Math.abs(fz) < 1e-12) {
+    fx = 1;
+    fz = 0;
+  }
+  // หันไปทางจุดไกลสุดจากจุดเริ่ม (กำหนดทิศ)
+  if ((far.x - first.x) * fx + (far.z - first.z) * fz < 0) {
+    fx = -fx;
+    fz = -fz;
+  }
+  const pcaSpread = Math.sqrt(Math.max(0, eig1) / pts.length);
+  if (pcaSpread < 0.1 && maxExcursionM < 0.3) {
     throw new Error(
-      `pelvis เคลื่อนที่แนวราบสุทธิแค่ ${mag.toFixed(2)}m — สั้นเกินกว่าจะหาแกนทิศทางเดินได้แม่นยำ `
-      + '(อาจไม่ใช่ trial เดินจริง หรือเดินไป-กลับจนหักล้างกัน)',
+      `pelvis เคลื่อนที่แนวราบน้อยเกินไป (net=${netMag.toFixed(2)}m, max=${maxExcursionM.toFixed(2)}m) `
+      + '— สั้นเกินกว่าจะหาแกนทิศทางเดินได้แม่นยำ',
     );
   }
-  return { fx: dx / mag, fz: dz / mag, netDisplacementM: mag };
+  return finish(fx, fz, 'pca', netMag);
 }
 
 export function computeShankAngleDeg(kneeSeries, ankleSeries, forwardAxis) {
@@ -183,6 +259,28 @@ export function computeAngularVelocityDps(t, angleDeg) {
   return w;
 }
 
+/**
+ * กรอง shank angle ด้วย Butterworth 2nd-order zero-lag แล้วค่อย central-diff → ω
+ * (ต้องสอดคล้องกับ computeFilteredVelocity — สัญญาณนี้ใช้ signal xcorr sync)
+ */
+export function computeFilteredAngularVelocityDps(t, angleDeg, options = {}) {
+  const cutoffHz = options.cutoffHz ?? DEFAULT_POSITION_CUTOFF_HZ;
+  const sampleRateHz = options.sampleRateHz ?? estimateSampleRateHz(t);
+  if (!Number.isFinite(sampleRateHz) || sampleRateHz <= 0) {
+    throw new Error('หา sample rate จาก timestamp ไม่ได้ — ต้องส่ง sampleRateHz เอง');
+  }
+  const effectiveCutoff = Math.min(cutoffHz, sampleRateHz * 0.45);
+  const smoothedAngleDeg = options.skipFilter
+    ? angleDeg.slice()
+    : filtfiltButterworth2(angleDeg, effectiveCutoff, sampleRateHz);
+  return {
+    smoothedAngleDeg,
+    shankAngularVelocityDps: computeAngularVelocityDps(t, smoothedAngleDeg),
+    sampleRateHz,
+    cutoffHz: effectiveCutoff,
+  };
+}
+
 function assertNoGaps(remainingGaps, label) {
   if (remainingGaps.length) {
     const ranges = remainingGaps.map((g) => `${g.startTimeS.toFixed(2)}-${g.endTimeS.toFixed(2)}s`).join(', ');
@@ -193,14 +291,28 @@ function assertNoGaps(remainingGaps, label) {
   }
 }
 
-function computeSideGait(parsed, kneeSeries, ankleSeries, forwardAxis, detectorOptions) {
+function computeSideGait(parsed, kneeSeries, ankleHsSeries, ankleAngleSeries, forwardAxis, detectorOptions, meta = {}) {
   const t0 = parsed.frames[0].time;
   const t = parsed.frames.map((f) => f.time - t0);
+  const angleSource = meta.angleSource || (ankleAngleSeries ? 'legacy-ankle' : 'unavailable');
 
-  const angleDeg = computeShankAngleDeg(kneeSeries, ankleSeries, forwardAxis);
-  const shankAngularVelocityDps = computeAngularVelocityDps(t, angleDeg);
+  let angleDeg = null;
+  let shankAngularVelocityDps = null;
+  let effectiveAngleSource = angleSource;
+  if (ankleAngleSeries) {
+    const rawAngleDeg = computeShankAngleDeg(kneeSeries, ankleAngleSeries, forwardAxis);
+    const filtered = computeFilteredAngularVelocityDps(t, rawAngleDeg, detectorOptions);
+    angleDeg = filtered.smoothedAngleDeg;
+    shankAngularVelocityDps = filtered.shankAngularVelocityDps;
+  } else if (ankleHsSeries && angleSource === 'unavailable') {
+    // Heel ใช้คำนวณ |ω| สำหรับ clock sync เท่านั้น — ห้าม peak shank angle / signed polarity
+    const rawAngleDeg = computeShankAngleDeg(kneeSeries, ankleHsSeries, forwardAxis);
+    const filtered = computeFilteredAngularVelocityDps(t, rawAngleDeg, detectorOptions);
+    shankAngularVelocityDps = filtered.shankAngularVelocityDps;
+    effectiveAngleSource = 'heel-for-envelope-only';
+  }
 
-  const forwardPosition = computeForwardPosition(ankleSeries, forwardAxis);
+  const forwardPosition = computeForwardPosition(ankleHsSeries, forwardAxis);
   const { smoothedPosition, velocity } = computeFilteredVelocity(t, forwardPosition, detectorOptions);
   const stanceIntervals = detectStanceIntervals(t, velocity, detectorOptions);
   // ใช้ smoothed position วัด stride — สอดคล้องกับสัญญาณที่ใช้ detect event
@@ -211,10 +323,10 @@ function computeSideGait(parsed, kneeSeries, ankleSeries, forwardAxis, detectorO
     let minY = Infinity;
     let maxY = -Infinity;
     for (let i = cycle.hsStartIdx; i <= cycle.hsEndIdx; i += 1) {
-      if (Number.isFinite(angleDeg[i])) peakAngleDeg = Math.max(peakAngleDeg, angleDeg[i]);
-      if (Number.isFinite(ankleSeries.y[i])) {
-        minY = Math.min(minY, ankleSeries.y[i]);
-        maxY = Math.max(maxY, ankleSeries.y[i]);
+      if (angleDeg && Number.isFinite(angleDeg[i])) peakAngleDeg = Math.max(peakAngleDeg, angleDeg[i]);
+      if (Number.isFinite(ankleHsSeries.y[i])) {
+        minY = Math.min(minY, ankleHsSeries.y[i]);
+        maxY = Math.max(maxY, ankleHsSeries.y[i]);
       }
     }
 
@@ -236,7 +348,8 @@ function computeSideGait(parsed, kneeSeries, ankleSeries, forwardAxis, detectorO
       strideLengthM: cycle.strideLengthM,
       cadenceSpm,
       walkingSpeedMps,
-      peakShankAngleDeg: Number.isFinite(peakAngleDeg) ? peakAngleDeg : null,
+      // ไม่มี malleolus → ห้ามเคลม peak shank angle จาก heel
+      peakShankAngleDeg: angleDeg && Number.isFinite(peakAngleDeg) ? peakAngleDeg : null,
       ankleClearanceM,
     };
   });
@@ -252,10 +365,11 @@ function computeSideGait(parsed, kneeSeries, ankleSeries, forwardAxis, detectorO
       meanStrideLengthM: mean(strideLengths),
       meanCadenceSpm: mean(cadences),
     },
-    // สำหรับ align ระดับสัญญาณ (xcorr) กับ IMU gyro — อิสระจาก event detector
+    // สำหรับ align ระดับสัญญาณ (xcorr) กับ IMU gyro — ต้องมี malleolus
     signals: {
       tS: t,
       shankAngularVelocityDps,
+      angleSource: effectiveAngleSource,
     },
   };
 }
@@ -274,16 +388,32 @@ function assertClearancePlausible(side, cycles, warnings) {
 }
 
 export function computeGaitFromMocap(parsed, markerRoles, options = {}) {
-  const { L_ASIS, R_ASIS, L_Knee, R_Knee, L_Ankle, R_Ankle } = markerRoles;
+  const anklePlan = pickAnkleRolePlan(markerRoles);
+  const roleIds = { ...markerRoles };
 
-  const rawByRole = {
-    L_ASIS: extractMarkerSeries(parsed, L_ASIS),
-    R_ASIS: extractMarkerSeries(parsed, R_ASIS),
-    L_Knee: extractMarkerSeries(parsed, L_Knee),
-    R_Knee: extractMarkerSeries(parsed, R_Knee),
-    L_Ankle: extractMarkerSeries(parsed, L_Ankle),
-    R_Ankle: extractMarkerSeries(parsed, R_Ankle),
-  };
+  // รวบรวม id ที่ต้อง extract (ห้ามซ้ำ)
+  const needed = new Map(); // roleLabel -> markerId
+  for (const role of ['L_ASIS', 'R_ASIS', 'L_Knee', 'R_Knee']) {
+    if (!Number.isFinite(roleIds[role])) {
+      throw new Error(`marker role ขาด: ${role}`);
+    }
+    needed.set(role, roleIds[role]);
+  }
+  for (const side of ['L', 'R']) {
+    const plan = anklePlan[side];
+    if (!plan?.hsRole || !Number.isFinite(roleIds[plan.hsRole])) {
+      throw new Error(`marker role ขาด ankle สำหรับ HS ขา ${side} (Ankle หรือ AnkleForHS)`);
+    }
+    needed.set(plan.hsRole, roleIds[plan.hsRole]);
+    if (plan.angleRole && Number.isFinite(roleIds[plan.angleRole])) {
+      needed.set(plan.angleRole, roleIds[plan.angleRole]);
+    }
+  }
+
+  const rawByRole = {};
+  for (const [role, id] of needed) {
+    rawByRole[role] = extractMarkerSeries(parsed, id);
+  }
 
   // interpolate gaps ต่อ series ก่อน normalize หน่วย
   const filledByRole = {};
@@ -299,6 +429,15 @@ export function computeGaitFromMocap(parsed, markerRoles, options = {}) {
     warnings,
   } = assertAndNormalizeCaptureUnits(filledByRole, options);
 
+  for (const side of ['L', 'R']) {
+    if (anklePlan[side].angleSource === 'unavailable') {
+      warnings.push(
+        `ขา ${side}: ไม่มี AnkleForAngle (lateral malleolus) — HS จาก heel/ForHS ได้; `
+        + 'shank angle ปิด; signal sync ใช้ได้แค่ |ω| envelope จาก heel (ไม่ใช่ lab gold-standard)',
+      );
+    }
+  }
+
   const asisL = seriesByRole.L_ASIS;
   const asisR = seriesByRole.R_ASIS;
   const pelvisX = asisL.x.map((v, i) => (v === null || asisR.x[i] === null ? null : (v + asisR.x[i]) / 2));
@@ -306,8 +445,24 @@ export function computeGaitFromMocap(parsed, markerRoles, options = {}) {
   const forwardAxis = computeForwardAxis(pelvisX, pelvisZ);
 
   const detectorOptions = options.detector || {};
-  const left = computeSideGait(parsed, seriesByRole.L_Knee, seriesByRole.L_Ankle, forwardAxis, detectorOptions);
-  const right = computeSideGait(parsed, seriesByRole.R_Knee, seriesByRole.R_Ankle, forwardAxis, detectorOptions);
+  const left = computeSideGait(
+    parsed,
+    seriesByRole.L_Knee,
+    seriesByRole[anklePlan.L.hsRole],
+    anklePlan.L.angleRole ? seriesByRole[anklePlan.L.angleRole] : null,
+    forwardAxis,
+    detectorOptions,
+    { angleSource: anklePlan.L.angleSource },
+  );
+  const right = computeSideGait(
+    parsed,
+    seriesByRole.R_Knee,
+    seriesByRole[anklePlan.R.hsRole],
+    anklePlan.R.angleRole ? seriesByRole[anklePlan.R.angleRole] : null,
+    forwardAxis,
+    detectorOptions,
+    { angleSource: anklePlan.R.angleSource },
+  );
 
   assertClearancePlausible('L', left.cycles, warnings);
   assertClearancePlausible('R', right.cycles, warnings);
@@ -323,6 +478,14 @@ export function computeGaitFromMocap(parsed, markerRoles, options = {}) {
     trueStepTimesS.push(hsEvents[i].timeS - hsEvents[i - 1].timeS);
     if (hsEvents[i].side === hsEvents[i - 1].side) sameSideRepeats += 1;
   }
+  // HS สลับข้างพลาด → meanStepTime / trueCadence ไม่น่าเชื่อ — flag ให้ปลายทางซ่อน
+  const bilateralReliable = sameSideRepeats === 0;
+  if (!bilateralReliable) {
+    warnings.push(
+      `bilateral.reliable=false: sameSideRepeats=${sameSideRepeats}/${Math.max(0, hsEvents.length - 1)} `
+      + 'ช่วง HS — meanStepTimeS / trueCadenceSpm ห้ามใช้ (ซ่อนที่ UI)',
+    );
+  }
   const meanStepTimeS = trueStepTimesS.length
     ? trueStepTimesS.reduce((a, b) => a + b, 0) / trueStepTimesS.length
     : null;
@@ -331,24 +494,43 @@ export function computeGaitFromMocap(parsed, markerRoles, options = {}) {
   const t1 = parsed.frames[parsed.frames.length - 1].time;
   const durationS = t1 - t0;
 
+  // เดินไป-กลับ / PCA: net displacement ≈ 0 → averageWalkingSpeed จาก net ไม่มีความหมาย
+  const netMeaningful = forwardAxis.method === 'net-start-end';
+  if (!netMeaningful) {
+    warnings.push(
+      `forwardAxis.method=${forwardAxis.method}: pelvisNet / averageWalkingSpeed จาก net ถูกปิด `
+      + `(net=${forwardAxis.netDisplacementM.toFixed(3)}m, maxExcursion=${forwardAxis.maxExcursionM.toFixed(3)}m)`,
+    );
+  }
+
   return {
     forwardAxis,
     perSide: { L: left, R: right },
     bilateral: {
       hsEventCount: hsEvents.length,
       trueStepTimesS,
-      meanStepTimeS,
-      trueCadenceSpm: meanStepTimeS ? 60 / meanStepTimeS : null,
+      meanStepTimeS: bilateralReliable ? meanStepTimeS : null,
+      trueCadenceSpm: bilateralReliable && meanStepTimeS ? 60 / meanStepTimeS : null,
       sameSideRepeats,
+      reliable: bilateralReliable,
+      // ค่าดิบไว้ debug เมื่อ reliable=false
+      meanStepTimeSRaw: meanStepTimeS,
+      trueCadenceSpmRaw: meanStepTimeS ? 60 / meanStepTimeS : null,
     },
     session: {
       durationS,
       pelvisNetForwardDisplacementM: forwardAxis.netDisplacementM,
-      averageWalkingSpeedMps: durationS > 0 ? forwardAxis.netDisplacementM / durationS : null,
+      pelvisMaxExcursionM: forwardAxis.maxExcursionM,
+      forwardAxisMethod: forwardAxis.method,
+      pelvisNetMeaningful: netMeaningful,
+      averageWalkingSpeedMps: netMeaningful && durationS > 0
+        ? forwardAxis.netDisplacementM / durationS
+        : null,
     },
     meta: {
       unitScale,
       warnings,
+      anklePlan,
     },
   };
 }

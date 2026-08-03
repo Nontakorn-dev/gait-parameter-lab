@@ -4,6 +4,7 @@ import { KalmanFilter } from './kalmanFilter.js';
 import { MadgwickFilter } from './madgwickFilter.js';
 import { rawAccelToG, rawGyroToDps, accelToAngle, movingAverage } from './signalUtils.js';
 import { VelocityIntegrator } from './velocityIntegrator.js';
+import { makeClosedCycleKey } from './cycleCoverage.js';
 
 const SAMPLE_RATE = 100;
 const WINDOW_SECONDS = 12;
@@ -17,6 +18,11 @@ const STRIDE_LENGTH_MIN_M = 0.10;
 const STRIDE_LENGTH_MAX_M = 1.80;
 /** |v_end| ก่อน de-drift สูงเกินนี้ = gravity leakage / ZUPT พัง → ไม่เชื่อระยะ */
 export const MAX_V_END_PRE_DRIFT_MPS = 2.0;
+/** strideTime > ratio × median(recent) → สงสัย missed HS (maxStrideTime 3.5s กลืนเคสนี้) */
+const SUSPECTED_MISSED_HS_STRIDE_TIME_RATIO = 1.8;
+/** absolute: ผู้ใหญ่เดินปกติ stride > 2.5s น่าสงสัยทันที (ไม่รอ history ≥ 2) */
+const SUSPECTED_MISSED_HS_ABS_STRIDE_TIME_S = 2.5;
+const RECENT_STRIDE_TIME_HISTORY = 8;
 const STANCE_ENTRY_THRESHOLD_MIN = 3;
 const STANCE_ENTRY_THRESHOLD_MAX = 12;
 const STANCE_ENTRY_VALLEY_THRESHOLD_MAX = 40;
@@ -399,7 +405,11 @@ export class GaitProcessor {
     this.latestParams = null;
     this.totalStepCount = 0;
     this.totalStrideCount = 0;
-    this.countedCycleStartSampleIds = new Set();
+    // closed cycles ที่นับแล้ว — เก็บ [startId, endId] เพื่อกันทับซ้อน (ไม่ใช่แค่ hsStart)
+    this.countedCycleIntervals = [];
+    // open stride ที่ emit แล้ว — Set ของ sampleId ตัวเลข (ห้ามปน 'open:*' ใน interval prune)
+    this.openStrideStartIds = new Set();
+    this.recentClosedStrideTimesS = [];
     // ZUPT diagnostic ต่อ cycle (ไม่ใช่แค่ cycle ล่าสุด) รอให้ analyze() drain ไปแนบกับ
     // payload ที่ส่งออกทาง onParams — ตรงนี้คือจุดเดียวที่ trace (ผ่าน app.js) จะได้ค่านี้จริง
     this.pendingCycleDiagnostics = [];
@@ -569,6 +579,7 @@ export class GaitProcessor {
     const strideUntrustedFlags = [];
     const vEndPreDriftByCycle = [];
     const vStartPreDriftByCycle = [];
+    const processedCycles = [];
 
     for (const cycle of cycles) {
       // นับทุก cycle ที่ยังไม่เคยนับ (ไม่ใช่แค่ cycle สุดท้าย) เพื่อไม่ให้พลาด
@@ -576,21 +587,106 @@ export class GaitProcessor {
       // ห้าม ×2 สมมติขาตรงข้าม — เซนเซอร์ข้างเดียว / เดินข้างเดียวจะฟ้องเป็น 2 ก้าวผิด
       // (step รวมสองข้างทำตอน aggregate เมื่อมี L+R จริง)
       const countableCycleStartSampleId = samples[cycle.hsStart.index]?.sampleId ?? null;
-      const isNewCycle = countableCycleStartSampleId !== null
-        && !this.countedCycleStartSampleIds.has(countableCycleStartSampleId);
+      const countableCycleEndSampleId = samples[cycle.hsEnd.index]?.sampleId ?? null;
+      const isOpenStride = Boolean(cycle.isOpenStride);
+
+      // สงสัย missed HS: absolute ก่อน (ไม่พึ่ง history) แล้วค่อย ratio กับ median ล่าสุด
+      let suspectedMissedHs = false;
+      if (!isOpenStride && Number.isFinite(cycle.strideTime)) {
+        if (cycle.strideTime > SUSPECTED_MISSED_HS_ABS_STRIDE_TIME_S) {
+          suspectedMissedHs = true;
+        } else if (this.recentClosedStrideTimesS.length >= 2) {
+          const sorted = [...this.recentClosedStrideTimesS].sort((a, b) => a - b);
+          const med = sorted[Math.floor(sorted.length / 2)];
+          if (Number.isFinite(med) && med > 0 && cycle.strideTime > SUSPECTED_MISSED_HS_STRIDE_TIME_RATIO * med) {
+            suspectedMissedHs = true;
+          }
+        }
+      }
+
+      // open ห้ามเข้า counted intervals — ไม่งั้น HS ตัวสุดท้ายที่เคยเป็น open จะบล็อก closed HS→HS ทีหลัง
+      let isNewCycle = false;
+      if (
+        !isOpenStride
+        && countableCycleStartSampleId !== null
+        && countableCycleEndSampleId !== null
+      ) {
+        const overlaps = this.countedCycleIntervals.filter((c) => (
+          countableCycleStartSampleId < c.endId && c.startId < countableCycleEndSampleId
+        ));
+        if (!overlaps.length) {
+          isNewCycle = true;
+        } else {
+          // ทับซ้อน: ถ้าอันใหม่สั้นกว่าและอยู่ในช่วงอันเก่า → แทนที่ (แยก double-stride ที่พลาด HS)
+          const newLen = countableCycleEndSampleId - countableCycleStartSampleId;
+          const canReplace = overlaps.every((o) => {
+            const oldLen = o.endId - o.startId;
+            return newLen < oldLen
+              && countableCycleStartSampleId >= o.startId
+              && countableCycleEndSampleId <= o.endId;
+          });
+          if (canReplace) {
+            for (const o of overlaps) {
+              const idx = this.countedCycleIntervals.indexOf(o);
+              if (idx >= 0) this.countedCycleIntervals.splice(idx, 1);
+              this.totalStrideCount = Math.max(0, this.totalStrideCount - 1);
+              this.totalStepCount = Math.max(0, this.totalStepCount - 1);
+              // บอกผู้ฟังให้ถอน cycle เก่าที่ถูกแทนที่ (reprocess / dashboard)
+              // key ต้องเป็น start-end ของอันเก่า — ห้ามใช้แค่ startId (จะชี้ตัวเองเมื่อ end เปลี่ยน)
+              this.pendingCycleDiagnostics.push({
+                cycleKey: makeClosedCycleKey(o.startId, o.endId),
+                retracted: true,
+                supersededByCycleKey: makeClosedCycleKey(
+                  countableCycleStartSampleId,
+                  countableCycleEndSampleId,
+                ),
+              });
+            }
+            isNewCycle = true;
+          }
+          // ไม่เช่นนั้นปฏิเสธ (เช่น long cycle มาทีหลังเมื่อมี short อยู่แล้ว)
+        }
+      }
       if (isNewCycle) {
-        this.countedCycleStartSampleIds.add(countableCycleStartSampleId);
+        this.countedCycleIntervals.push({
+          startId: countableCycleStartSampleId,
+          endId: countableCycleEndSampleId,
+        });
         this.totalStrideCount += 1;
         this.totalStepCount += 1;
+        if (Number.isFinite(cycle.strideTime)) {
+          this.recentClosedStrideTimesS.push(cycle.strideTime);
+          if (this.recentClosedStrideTimesS.length > RECENT_STRIDE_TIME_HISTORY) {
+            this.recentClosedStrideTimesS.shift();
+          }
+        }
       }
+
+      // open stride ยังต้อง emit diagnostic (ธงแยก) แต่ใช้ key คนละแบบกันชน closed
+      const openDiagKey = isOpenStride && countableCycleStartSampleId !== null
+        ? `open:${countableCycleStartSampleId}`
+        : null;
+      const shouldEmitDiagnostic = isNewCycle
+        || (isOpenStride && openDiagKey && !this.openStrideStartIds.has(countableCycleStartSampleId));
+      if (isOpenStride && openDiagKey && shouldEmitDiagnostic) {
+        this.openStrideStartIds.add(countableCycleStartSampleId);
+      }
+
+      // ไม่ emit ใหม่ (ทับซ้อนที่ปฏิเสธ / open ซ้ำ) — ไม่วัดซ้ำ ไม่เป็น latestParams
+      if (!shouldEmitDiagnostic) {
+        continue;
+      }
+      processedCycles.push(cycle);
 
       const integrationWindow = findStepIntegrationWindow(smoothedAngVel, timestamps, cycle);
       const metricStartIdx = integrationWindow.startIdx;
       const metricEndIdx = integrationWindow.endIdx;
-      const segmentStartIdx = metricStartIdx;
+      // ส่งจาก HS → ปลาย window เพื่อให้ start-only ZUPT วัด v ก่อนเข้า quiet ได้จริง
+      // (ถ้า slice แค่ quiet→end แล้วลบ velocity[0] จะเป็น no-op เพราะ trapz ตั้ง [0]=0)
+      const segmentStartIdx = Math.min(cycle.hsStart.index, metricStartIdx);
       const segmentEndIdx = metricEndIdx;
-      const localIntegrationStartIdx = 0;
-      const localIntegrationEndIdx = metricEndIdx - metricStartIdx;
+      const localIntegrationStartIdx = metricStartIdx - segmentStartIdx;
+      const localIntegrationEndIdx = metricEndIdx - segmentStartIdx;
 
       strideTimes.push(cycle.strideTime);
       stancePcts.push(cycle.stancePct);
@@ -636,6 +732,8 @@ export class GaitProcessor {
         strideLengthSigned,
         clearance,
         velocityPreDriftCorrection,
+        vStartPreDrift: vStartFromIntegrator,
+        vEndPreDrift: vEndFromIntegrator,
       } = this.velocityIntegrator.computeStrideMetrics(
         cycleAy,
         cycleAz,
@@ -648,17 +746,17 @@ export class GaitProcessor {
           quaternions: madgwickComplete ? cycleQuats : undefined,
         },
       );
-      const strideLength = Math.max(
-        STRIDE_LENGTH_MIN_M,
-        Math.min(STRIDE_LENGTH_MAX_M, integratedStrideLength),
+      // open stride ไม่ใช้เป็นระยะทางตีพิมพ์ — ยังคำนวณไว้ debug แต่ mark แยก
+      const strideLength = isOpenStride
+        ? null
+        : Math.max(
+          STRIDE_LENGTH_MIN_M,
+          Math.min(STRIDE_LENGTH_MAX_M, integratedStrideLength),
+        );
+      const strideClamped = !isOpenStride && (
+        integratedStrideLength < STRIDE_LENGTH_MIN_M
+        || integratedStrideLength > STRIDE_LENGTH_MAX_M
       );
-      // step length จากเซนเซอร์ข้างเดียววัดไม่ได้โดยตรง — ห้าม stride/2 (สมมาตรหลอก)
-      // flag เมื่อค่าถูก clamp (ชนเพดาน/พื้น) เพื่อไม่ให้ปนกับค่าวัดจริงตอนทำ ICC/Bland-Altman
-      const strideClamped = integratedStrideLength < STRIDE_LENGTH_MIN_M
-        || integratedStrideLength > STRIDE_LENGTH_MAX_M;
-      // ZUPT-validity: correctDrift สมมติ v=0 ที่ปลาย window — ถ้าปลายไม่ใช่จุดเท้านิ่ง
-      // (‖accel‖ เบี่ยงจาก 1g มาก) การประมาณระยะจะต่ำกว่าจริงแบบ systematic. ตรวจ ‖accel‖
-      // ที่ขอบ window เพื่อ mark ค่า low-confidence โดยไม่แก้ค่า (การย้าย window ต้อง validate ข้อมูลจริง)
       const accelMagAt = (idx) => (idx >= 0 && idx < sampleCount
         ? Math.sqrt(axG[idx] * axG[idx] + ayG[idx] * ayG[idx] + azG[idx] * azG[idx])
         : NaN);
@@ -668,35 +766,60 @@ export class GaitProcessor {
         Number.isFinite(startDev) ? startDev : 0,
         Number.isFinite(endDev) ? endDev : 0,
       );
-      const vEndPreDrift = velocityPreDriftCorrection?.length
-        ? velocityPreDriftCorrection[velocityPreDriftCorrection.length - 1]
-        : null;
-      const vStartPreDrift = velocityPreDriftCorrection?.length
-        ? velocityPreDriftCorrection[0]
-        : null;
-      // |v_end| สูง = มี accel ค้างจาก gravity leakage → de-drift ลบได้แค่เชิงเส้น
-      const strideUntrusted = Number.isFinite(vEndPreDrift)
-        && Math.abs(vEndPreDrift) > MAX_V_END_PRE_DRIFT_MPS;
+      const vEndPreDrift = Number.isFinite(vEndFromIntegrator)
+        ? vEndFromIntegrator
+        : (velocityPreDriftCorrection?.length
+          ? velocityPreDriftCorrection[velocityPreDriftCorrection.length - 1]
+          : null);
+      // v ที่จุดเข้า window ก่อนรีเซ็ต ZUPT (วัดจาก integrate ตั้งแต่ HS) — ไม่ใช่ trapz[0]=0 ปลอม
+      const vStartPreDrift = Number.isFinite(vStartFromIntegrator)
+        ? vStartFromIntegrator
+        : (velocityPreDriftCorrection?.length ? velocityPreDriftCorrection[0] : null);
+      const strideUntrusted = isOpenStride || suspectedMissedHs || (
+        Number.isFinite(vEndPreDrift)
+        && Math.abs(vEndPreDrift) > MAX_V_END_PRE_DRIFT_MPS
+      );
 
       strideLengths.push(strideLength);
       clearances.push(Math.max(0, Math.min(0.3, clearance)));
       strideClampedFlags.push(strideClamped);
       strideUntrustedFlags.push(strideUntrusted);
-      strideSignedLengths.push(strideLengthSigned);
+      strideSignedLengths.push(isOpenStride ? null : strideLengthSigned);
       zuptAccelDeviations.push(zuptDeviation);
       vEndPreDriftByCycle.push(Number.isFinite(vEndPreDrift) ? vEndPreDrift : null);
       vStartPreDriftByCycle.push(Number.isFinite(vStartPreDrift) ? vStartPreDrift : null);
 
-      // เก็บ ZUPT diagnostic ของ "ทุก" cycle ใหม่ (ไม่ใช่แค่ cycle สุดท้ายที่ latestParams เก็บ)
-      // เพื่อให้วิเคราะห์ได้ว่า window วางผิดจุดเป็นระบบหรือแค่บางจังหวะ — วางคู่กับ isNewCycle
-      // เดียวกับที่ใช้นับ step เพื่อไม่ให้ diagnostic ซ้ำ cycle เดิมเวลา buffer overlap กันข้าม analyze()
-      if (isNewCycle) {
+      if (shouldEmitDiagnostic) {
+        const strideTime = cycle.strideTime;
+        const nullOpen = isOpenStride;
         this.pendingCycleDiagnostics.push({
-          cycleKey: String(countableCycleStartSampleId),
+          cycleKey: isOpenStride
+            ? openDiagKey
+            : makeClosedCycleKey(countableCycleStartSampleId, countableCycleEndSampleId),
+          cycleStartSampleId: countableCycleStartSampleId,
+          cycleEndSampleId: countableCycleEndSampleId,
           cycleStartTimestampMs: samples[cycle.hsStart.index]?.timestampMs ?? null,
-          strideLengthM: strideUntrusted ? null : strideLength,
+          cycleEndTimestampMs: samples[cycle.hsEnd.index]?.timestampMs ?? null,
+          strideLengthM: (strideUntrusted || isOpenStride) ? null : strideLength,
           strideLengthClamped: strideClamped || strideUntrusted,
           strideLengthUntrusted: strideUntrusted,
+          suspectedMissedHs,
+          isOpenStride,
+          side: samples[cycle.hsStart.index]?.side ?? null,
+          strideTimeS: nullOpen ? null : (Number.isFinite(strideTime) ? strideTime : null),
+          cadenceSpm: nullOpen ? null : (
+            Number.isFinite(strideTime) && strideTime > 0 ? (2 / strideTime) * 60 : null
+          ),
+          walkingSpeedMps: nullOpen ? null : (
+            (Number.isFinite(strideLength) && Number.isFinite(strideTime) && strideTime > 0)
+              ? strideLength / strideTime
+              : null
+          ),
+          stancePct: nullOpen ? null : (Number.isFinite(cycle.stancePct) ? cycle.stancePct : null),
+          swingPct: nullOpen ? null : (Number.isFinite(cycle.swingPct) ? cycle.swingPct : null),
+          temporalSource: cycle.temporalSource ?? null,
+          peakShankAngleDeg: nullOpen ? null : (Number.isFinite(peakAngle) ? peakAngle : null),
+          clearanceM: nullOpen ? null : Math.max(0, Math.min(0.3, clearance)),
           zuptCheck: {
             vStartPreDrift: Number.isFinite(vStartPreDrift) ? vStartPreDrift : null,
             vEndPreDrift: Number.isFinite(vEndPreDrift) ? vEndPreDrift : null,
@@ -705,14 +828,13 @@ export class GaitProcessor {
             maxVEndPreDriftMps: MAX_V_END_PRE_DRIFT_MPS,
           },
         });
-        // กันโตไม่จำกัดถ้าไม่มีใคร drain (เช่น analyze() ถูกเรียกโดยไม่มี consumer)
         if (this.pendingCycleDiagnostics.length > 500) {
           this.pendingCycleDiagnostics.shift();
         }
       }
     }
 
-    if (cycles.length === 0) {
+    if (processedCycles.length === 0) {
       this.processedData = {
         timestamps,
         angularVelocity: angVelDeg,
@@ -733,8 +855,8 @@ export class GaitProcessor {
       return;
     }
 
-    const lastIdx = cycles.length - 1;
-    const lastCycle = cycles[lastIdx];
+    const lastIdx = processedCycles.length - 1;
+    const lastCycle = processedCycles[lastIdx];
     const lastIntegrationWindow = integrationWindows[lastIdx] ?? null;
     const strideLengthLast = strideLengths[lastIdx];
     const strideClampedLast = strideClampedFlags[lastIdx] ?? false;
@@ -749,6 +871,7 @@ export class GaitProcessor {
     const cycleStartSample = samples[lastCycle.hsStart.index] ?? null;
     const cycleEndSample = samples[lastCycle.hsEnd.index] ?? null;
     const cycleStartSampleId = cycleStartSample?.sampleId ?? null;
+    const cycleEndSampleId = cycleEndSample?.sampleId ?? null;
     const cycleStartTimestampMs = cycleStartSample?.timestampMs ?? null;
 
     // zuptCheck ของ cycle ล่าสุด — ให้ reprocess/UI เห็น vEnd เสมอ
@@ -760,13 +883,14 @@ export class GaitProcessor {
       maxVEndPreDriftMps: MAX_V_END_PRE_DRIFT_MPS,
     };
 
-    // ตัด id ของ cycle ที่เลื่อนออกจาก buffer แล้วทิ้ง (ตรวจซ้ำไม่ได้อีก) เพื่อไม่ให้ Set โตไม่จำกัด
+    // ตัด interval / open id ที่เลื่อนออกจาก buffer แล้วทิ้ง เพื่อไม่ให้ Set โตไม่จำกัด
     const oldestBufferedSampleId = samples[0]?.sampleId ?? null;
     if (Number.isFinite(oldestBufferedSampleId)) {
-      for (const countedId of this.countedCycleStartSampleIds) {
-        if (countedId < oldestBufferedSampleId) {
-          this.countedCycleStartSampleIds.delete(countedId);
-        }
+      this.countedCycleIntervals = this.countedCycleIntervals.filter(
+        (c) => c.endId >= oldestBufferedSampleId,
+      );
+      for (const id of [...this.openStrideStartIds]) {
+        if (id < oldestBufferedSampleId) this.openStrideStartIds.delete(id);
       }
     }
 
@@ -774,16 +898,23 @@ export class GaitProcessor {
       ? (this.latestSampleTimestampMs - this.sessionStartTime) / 1000
       : 0;
 
+    const lastIsOpen = Boolean(lastCycle.isOpenStride);
     // cadence แบบประมาณ steps/min จากขาเดียว (สากลใน unilateral IMU / เทียบ MoCap)
     // — ไม่ได้แปลว่า stepCount = 2×strideCount; นับก้าวจริงดู stepCount/aggregate
-    const cadence = strideTimeLast > 0 ? (2 / strideTimeLast) * 60 : 0;
+    const cadence = !lastIsOpen && strideTimeLast > 0 ? (2 / strideTimeLast) * 60 : null;
     const stepLength = null;
     const stepTime = null;
-    const walkingSpeed = strideTimeLast > 0 && Number.isFinite(strideLengthLast)
+    const walkingSpeed = !lastIsOpen && strideTimeLast > 0 && Number.isFinite(strideLengthLast)
       ? strideLengthLast / strideTimeLast
-      : 0;
+      : null;
     // double support ต้องมี HS/TO สองข้าง — สูตร 2·stance−100 สมมาตรหลอก (พังกับ stroke)
     const doubleSupport = null;
+
+    const cycleKey = cycleStartSampleId !== null
+      ? (lastIsOpen
+        ? `open:${cycleStartSampleId}`
+        : makeClosedCycleKey(cycleStartSampleId, cycleEndSampleId))
+      : `${cycleStartTimestampMs ?? Date.now()}`;
 
     this.latestParams = {
       strideLength: strideUntrustedLast ? null : strideLengthLast,
@@ -791,20 +922,21 @@ export class GaitProcessor {
       // clinical metadata: แยกค่าที่ถูก clamp ออกจากค่าวัดจริง + ธง ZUPT low-confidence
       strideLengthClamped: strideClampedLast || strideUntrustedLast,
       strideLengthUntrusted: strideUntrustedLast,
+      isOpenStride: lastIsOpen,
       strideLengthSignedM: strideSignedLast,
       zuptAccelDeviationG: Number.isFinite(zuptAccelDeviationLast) ? zuptAccelDeviationLast : null,
       zuptCheck: lastZuptCheck,
-      clearance: clearanceLast,
+      clearance: lastIsOpen ? null : clearanceLast,
       cadence,
-      strideTime: strideTimeLast,
+      strideTime: lastIsOpen ? null : strideTimeLast,
       stepTime,
-      stanceTime: lastCycle.stanceTime,
-      swingTime: lastCycle.swingTime,
-      stancePct: stancePctLast,
-      swingPct: swingPctLast,
+      stanceTime: lastIsOpen ? null : lastCycle.stanceTime,
+      swingTime: lastIsOpen ? null : lastCycle.swingTime,
+      stancePct: lastIsOpen ? null : stancePctLast,
+      swingPct: lastIsOpen ? null : swingPctLast,
       temporalSource: lastCycle.temporalSource ?? null,
       walkingSpeed: strideUntrustedLast ? null : walkingSpeed,
-      peakShankAngle: peakAngleLast,
+      peakShankAngle: lastIsOpen ? null : peakAngleLast,
       doubleSupport,
       orientationFilter: this.orientationFilterMode,
       stepCount: this.totalStepCount,
@@ -813,7 +945,7 @@ export class GaitProcessor {
       cycleCount: 1,
       strideLengths: Number.isFinite(strideLengthLast) ? [strideLengthLast] : [],
       stepLengths: [],
-      strideTimes: [strideTimeLast],
+      strideTimes: lastIsOpen ? [] : [strideTimeLast],
       cycleStartSampleId,
       cycleStartTimestampMs,
       cycleEndTimestampMs: cycleEndSample?.timestampMs ?? null,
@@ -821,7 +953,7 @@ export class GaitProcessor {
       integrationEndTimestampS: lastIntegrationWindow?.endTime ?? null,
       integrationAngularVelocityThresholdDps: lastIntegrationWindow?.threshold ?? null,
       integrationSource: lastIntegrationWindow?.source ?? null,
-      cycleKey: cycleStartSampleId !== null ? String(cycleStartSampleId) : `${cycleStartTimestampMs ?? Date.now()}`,
+      cycleKey,
       side: cycleStartSample?.side ?? null,
       sensorName: cycleStartSample?.sensorName ?? null,
       sensorMount: cycleStartSample?.sensorMount ?? null,
@@ -866,7 +998,9 @@ export class GaitProcessor {
     this.latestParams = null;
     this.totalStepCount = 0;
     this.totalStrideCount = 0;
-    this.countedCycleStartSampleIds = new Set();
+    this.countedCycleIntervals = [];
+    this.openStrideStartIds = new Set();
+    this.recentClosedStrideTimesS = [];
     this.pendingCycleDiagnostics = [];
     this.nextSampleId = 1;
     this.sessionStartTime = null;

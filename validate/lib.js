@@ -1,4 +1,5 @@
 import { minFinite } from '../src/util/finiteStats.js';
+import { computeCycleTimeCoverage } from '../src/gait/cycleCoverage.js';
 
 // Pure, DOM-free helpers สำหรับ validate/app.js — แยกไว้ต่างหากเพื่อ unit test ได้ตรง ๆ
 // (ไม่มีการอ้าง document/window เลยในไฟล์นี้)
@@ -43,6 +44,7 @@ export function sensorLabel(sensorKey, side) {
 export function computeCyclesBySensor(cycles) {
   const map = new Map();
   for (const c of cycles || []) {
+    if (c?.retracted) continue;
     const key = c.sensorKey || "_";
     if (!map.has(key)) map.set(key, []);
     map.get(key).push(c);
@@ -116,28 +118,57 @@ export function summarizeCycles(cycles, thresholds = {}) {
 export function computeDistanceCheck(data) {
   const distanceM = data.groundTruth?.distanceM;
   const bySensor = computeCyclesBySensor(data.cycles);
+  const t0Ms = computeGlobalT0Ms(data);
   const perSensor = [];
   for (const [sensorKey, list] of bySensor) {
-    // strideLengthM ในไพพ์ไลน์จริงเป็นเลขเสมอ (ผ่าน clamp แล้ว) แต่กันไว้เผื่อไฟล์ที่แก้ไข
-    // มือหรือเคสอนาคต — cycle ที่ไม่มีค่าไม่ควรถูกนับเป็น 0 (จะทำให้ sum ต่ำลงและ errorPct
-    // ติดลบเกินจริงแบบเงียบ ๆ) จึงแยกนับเป็น noDataCount แทน
-    let sum = 0;
+    let sumAll = 0;
+    let sumClean = 0;
     let noDataCount = 0;
+    let openStrideCount = 0;
+    let excludedClampedCount = 0;
     for (const c of list) {
-      if (Number.isFinite(c.strideLengthM)) {
-        sum += c.strideLengthM;
-      } else {
-        noDataCount += 1;
+      if (c.isOpenStride) {
+        openStrideCount += 1;
+        continue;
       }
+      if (!Number.isFinite(c.strideLengthM)) {
+        noDataCount += 1;
+        continue;
+      }
+      sumAll += c.strideLengthM;
+      const dirty = c.strideLengthClamped || c.strideLengthUntrusted || c.suspectedMissedHs;
+      if (dirty) {
+        excludedClampedCount += 1;
+        continue;
+      }
+      sumClean += c.strideLengthM;
     }
-    perSensor.push({ sensorKey, side: list[0]?.side ?? null, sumStrideLengthM: sum, cycleCount: list.length, noDataCount });
+    const coverage = computeCycleTimeCoverage(list, { t0Ms });
+    perSensor.push({
+      sensorKey,
+      side: list[0]?.side ?? null,
+      sumStrideLengthM: sumAll,
+      sumStrideLengthCleanM: sumClean,
+      excludedClampedCount,
+      cycleCount: list.length,
+      noDataCount,
+      openStrideCount,
+      coverageGapS: coverage.coverageGapS,
+      coverageRatio: coverage.coverageRatio,
+      hasCoverageGap: coverage.hasCoverageGap,
+      distanceGateOk: !coverage.hasCoverageGap,
+    });
   }
   if (!Number.isFinite(distanceM) || !perSensor.length) {
     return { distanceM: Number.isFinite(distanceM) ? distanceM : null, perSensor, hasCheck: false };
   }
   const withError = perSensor.map((p) => ({
     ...p,
-    errorPct: ((p.sumStrideLengthM - distanceM) / distanceM) * 100,
+    // pilot gate ใช้ clean เท่านั้น — แต่มี coverage gap → ปฏิเสธ (errorPct = null)
+    errorPct: p.distanceGateOk
+      ? ((p.sumStrideLengthCleanM - distanceM) / distanceM) * 100
+      : null,
+    errorPctAll: ((p.sumStrideLengthM - distanceM) / distanceM) * 100,
   }));
   return { distanceM, perSensor: withError, hasCheck: true };
 }

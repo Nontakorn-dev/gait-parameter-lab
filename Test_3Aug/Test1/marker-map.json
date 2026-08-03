@@ -1,0 +1,9 @@
+{
+  "L_ASIS": 1,
+  "L_Knee": 2,
+  "L_AnkleForHS": 6,
+  "R_ASIS": 7,
+  "R_Knee": 8,
+  "R_AnkleForHS": 4,
+  "_note": "Test1: Heel เท่านั้น (M4=R Heel, M6=L Heel). ไม่มี lateral malleolus → AnkleForAngle ว่าง; HS จาก heel ได้, shank angle ปิด, signal sync ใช้ |ω| envelope เท่านั้น. Trial ถัดไปต้องติด malleolus."
+}

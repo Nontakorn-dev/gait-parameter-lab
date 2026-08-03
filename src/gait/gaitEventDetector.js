@@ -332,6 +332,7 @@ export class GaitEventDetector {
         stancePct: temporalMetrics.stancePct,
         swingPct: temporalMetrics.swingPct,
         temporalSource: temporalMetrics.temporalSource,
+        isOpenStride: false,
       });
     }
 
@@ -418,7 +419,8 @@ export class GaitEventDetector {
 
             rawStrides.push({
               hsStart: { index: hsStartIdx, time: getTimeAt(timestamps, hsStartIdx, dt), type: 'HS' },
-              hsEnd: { index: endIdx, time: getTimeAt(timestamps, endIdx, dt), type: 'HS' },
+              // จุดจบคือ "ขานิ่ง" ไม่ใช่ HS จริง — ต้องแยกจาก stride เต็ม (HS→HS)
+              hsEnd: { index: endIdx, time: getTimeAt(timestamps, endIdx, dt), type: 'STILL' },
               to: toIdx !== null ? { index: toIdx, time: getTimeAt(timestamps, toIdx, dt), type: 'TO' } : null,
               msv: msvIdx !== null ? { index: msvIdx, time: getTimeAt(timestamps, msvIdx, dt), type: 'MSV' } : null,
               strideTime: openStrideTime,
@@ -427,6 +429,7 @@ export class GaitEventDetector {
               stancePct: temporalMetrics.stancePct,
               swingPct: temporalMetrics.swingPct,
               temporalSource: temporalMetrics.temporalSource,
+              isOpenStride: true,
             });
           }
         }

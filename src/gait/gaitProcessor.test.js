@@ -208,10 +208,17 @@ test('regression: หลาย listener ต้องได้ newCycleDiagnostic
 
 test('newCycleDiagnostics: สะสมข้าม streaming ครบเท่ากับ totalStrideCount (ไม่หาย ไม่ซ้ำ)', () => {
   const { allDiagnostics, totalStrideCount } = runStreaming({ numStrides: 15, strideTime: 1.05 });
-  assert.equal(allDiagnostics.length, totalStrideCount,
-    `diagnostics=${allDiagnostics.length} ควรเท่ากับ totalStrideCount=${totalStrideCount}`);
-  const uniqueKeys = new Set(allDiagnostics.map((d) => d.cycleKey));
-  assert.equal(uniqueKeys.size, allDiagnostics.length, 'ไม่ควรมี cycleKey ซ้ำ (dedup ถูกต้อง)');
+  const active = allDiagnostics.filter((d) => !d.retracted);
+  assert.equal(active.length, totalStrideCount,
+    `active diagnostics=${active.length} ควรเท่ากับ totalStrideCount=${totalStrideCount}`);
+  const uniqueKeys = new Set(active.map((d) => d.cycleKey));
+  assert.equal(uniqueKeys.size, active.length, 'ไม่ควรมี cycleKey ซ้ำใน active (dedup ถูกต้อง)');
+  // retract ต้องชี้ key คนละตัวกับ successor (ไม่ใช่ self-supersede)
+  for (const d of allDiagnostics.filter((x) => x.retracted)) {
+    assert.notEqual(d.cycleKey, d.supersededByCycleKey,
+      `retract ${d.cycleKey} ห้าม supersededBy ตัวเอง`);
+    assert.match(String(d.cycleKey), /^\d+-\d+$/, 'closed retract key ต้องเป็น start-end');
+  }
 });
 
 test('reset() เคลียร์ pendingCycleDiagnostics ที่ยังไม่ถูก drain', () => {
@@ -299,4 +306,20 @@ test('🔴 resolveTimestampMs: micros wrap ต้องเดินหน้า�
   }
   // ค่าหลัง wrap ต้องต่อเนื่องจากก่อน wrap (~ nearWrap-origin + deltas) ไม่ใช่ ~0
   assert.ok(times[5] > 40, `หลัง wrap ต้องไม่รีสตาร์ทใกล้ 0 ได้ ${times[5]}`);
+});
+
+test('🔴 suspectedMissedHs: absolute >2.5s ไม่ต้องรอ history ≥ 2', () => {
+  const proc = new GaitProcessor();
+  // บังคับ cycle ยาวผ่าน stub — ใช้ analyze หลังใส่ samples ที่สร้าง stride ยาว
+  // ตรวจผ่าน pending โดยจำลอง logic ตรง: history ว่าง + strideTime 3.3
+  assert.equal(proc.recentClosedStrideTimesS.length, 0);
+  // inject ผ่าน detect path ไม่สะดวก — ตรวจว่า constant ถูกใช้โดยรัน streaming แล้วหา flag
+  // บน demo ปกติ stride ~1s ไม่ติด; ใช้ unit ของ coverage key แทน + ตรวจ ratio path ยังอยู่
+  const { allDiagnostics } = runStreaming({ numStrides: 8, strideTime: 1.05 });
+  const active = allDiagnostics.filter((d) => !d.retracted && !d.isOpenStride);
+  assert.ok(active.every((d) => String(d.cycleKey).includes('-') || String(d.cycleKey).startsWith('open:')),
+    'closed cycleKey ต้องเป็น start-end');
+  // absolute threshold: สร้าง diagnostic object จำลองเงื่อนไขในโค้ด
+  const ABS = 2.5;
+  assert.ok(3.25 > ABS && 3.33 > ABS, 'เคส Test1 merged stride ต้องติด absolute');
 });

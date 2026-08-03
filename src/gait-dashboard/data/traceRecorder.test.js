@@ -221,6 +221,21 @@ test('recordCycle เก็บได้ทุก cycle ไม่ใช่แค�
   assert.deepEqual(trace.cycles.map((c) => c.cycleKey), ['1', '2', '3']);
 });
 
+test('🔴 retractCycle: ลบรายการเดิมออกจาก cycles จริง (ไม่เหลือ RETRACT marker)', () => {
+  const rec = new TraceRecorder();
+  rec.start();
+  rec.recordCycle(cycleDiagnostic({ cycleKey: '100-200', strideLengthM: 1.8 }));
+  rec.recordCycle(cycleDiagnostic({ cycleKey: '200-300', strideLengthM: 1.1 }));
+  assert.equal(rec.retractCycle('100-200'), 1);
+  assert.deepEqual(rec.buildTrace().cycles.map((c) => c.cycleKey), ['200-300']);
+  // recordCycle(retracted) ก็ต้องลบ ไม่ push marker
+  rec.recordCycle(cycleDiagnostic({ cycleKey: '200-300', strideLengthM: 0.5 }));
+  rec.recordCycle({ cycleKey: '200-300', retracted: true, supersededByCycleKey: '200-280' });
+  assert.equal(rec.cycleCount(), 0);
+  rec.recordCycle(cycleDiagnostic({ cycleKey: '200-280', strideLengthM: 0.9 }));
+  assert.deepEqual(rec.buildTrace().cycles.map((c) => [c.cycleKey, c.strideLengthM]), [['200-280', 0.9]]);
+});
+
 test('recordCycle หยุดรับที่ maxCycles (ไม่โตไม่จำกัด) และ mark cyclesTruncated (ไม่ตัดข้อมูลเงียบ)', () => {
   const rec = new TraceRecorder({ maxCycles: 3 });
   rec.start();

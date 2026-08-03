@@ -4,6 +4,7 @@ import assert from 'node:assert/strict';
 import { generateWalkingData } from '../src/gait-dashboard/data/demoDataGenerator.js';
 import { TraceRecorder } from '../src/gait-dashboard/data/traceRecorder.js';
 import { GaitProcessor } from '../src/gait/gaitProcessor.js';
+import { GAIT_ANALYZE_EVERY_SAMPLES } from '../src/gait/gaitRuntimeConfig.js';
 import {
   compareMocapToImu,
   reprocessImuTrace,
@@ -13,6 +14,7 @@ import {
   estimateHsTimeLagS,
   estimateSignalLagS,
   estimateSignalOnsetS,
+  resolveOverlappingImuCycles,
 } from './compareImuTrace.js';
 
 function buildDemoTrace({ numStrides = 8, side = 'R', boardEpochMs = 5000, seed = 42 } = {}) {
@@ -88,10 +90,12 @@ function fakeMocapFromImuCycles(imuCycles, side = 'R') {
       L: side === 'L' ? { cycles, summary: {} } : { cycles: [], summary: {} },
       R: side === 'R' ? { cycles, summary: {} } : { cycles: [], summary: {} },
     },
-    bilateral: { trueCadenceSpm: 110, sameSideRepeats: 0 },
+    bilateral: { trueCadenceSpm: 110, sameSideRepeats: 0, reliable: true },
     session: {
       durationS: 10,
       pelvisNetForwardDisplacementM: cycles.reduce((a, c) => a + (c.strideLengthM || 0), 0),
+      pelvisNetMeaningful: true,
+      forwardAxisMethod: 'net-start-end',
     },
   };
 }
@@ -113,9 +117,50 @@ test('reprocessImuTrace: ได้ cycles จาก demo samples', () => {
   const result = reprocessImuTrace(trace);
   assert.equal(result.ok, true);
   assert.equal(result.source, 'reprocess');
-  assert.ok(result.bySide.R.length >= 3, `ควรได้หลาย cycle ได้ ${result.bySide.R.length}`);
-  assert.ok(result.bySide.R.every((c) => Number.isFinite(c.strideLengthM)));
-  assert.ok(result.bySide.R.every((c) => Number.isFinite(c.cadenceSpm)));
+  const closed = result.bySide.R.filter((c) => !c.isOpenStride);
+  assert.ok(closed.length >= 3, `ควรได้หลาย closed cycle ได้ ${closed.length}`);
+  assert.ok(closed.every((c) => Number.isFinite(c.strideLengthM)), 'closed ต้องมี stride');
+  assert.ok(closed.every((c) => Number.isFinite(c.cadenceSpm)), 'closed ต้องมี cadence จาก diagnostic');
+});
+
+test('🔴 reprocessImuTrace: diagnostic ไม่ตกหล่น + deterministic (mirror-live)', () => {
+  const trace = buildDemoTrace({ numStrides: 8, side: 'R', seed: 11 });
+  const a = reprocessImuTrace(trace);
+  const b = reprocessImuTrace(trace);
+  assert.equal(a.reprocessMode, 'mirror-live');
+  const keys = (r) => r.bySide.R.map((x) => x.cycleKey).sort().join(',');
+  assert.equal(keys(a), keys(b), 'รันซ้ำต้องได้ cycleKey ชุดเดียวกัน');
+  assert.ok(a.bySide.R.filter((c) => !c.isOpenStride).length >= 5,
+    `ควรได้หลาย closed cycle ได้ ${a.bySide.R.length}`);
+  // ทุก closed cycle ต้องมาจาก diagnostic/params — ไม่หายเงียบ
+  assert.ok(a.bySide.R.every((c) => c.cycleKey), 'ต้องมี cycleKey');
+  assert.ok(
+    a.bySide.R.some((c) => c.zuptCheck && Number.isFinite(c.zuptCheck.vEndPreDrift)),
+    'diagnostic merge ต้องติด zuptCheck',
+  );
+});
+
+test('🔴 reprocessImuTrace: default mirror-live ≡ forceStreaming (ต้องเท่ากัน)', () => {
+  const trace = buildDemoTrace({ numStrides: 8, side: 'R', seed: 11 });
+  const live = reprocessImuTrace(trace);
+  const stream = reprocessImuTrace(trace, { analyzeEvery: 40, forceStreaming: true });
+  const keySig = (r) => r.bySide.R
+    .filter((c) => !c.isOpenStride)
+    .map((c) => c.cycleKey)
+    .sort()
+    .join(',');
+  assert.equal(keySig(live), keySig(stream), 'default ต้อง mirror live streaming');
+  assert.ok(live.bySide.R.filter((c) => !c.isOpenStride).length >= 3);
+});
+
+test('🔴 reprocessImuTrace: analyzeEvery เป็นส่วนของสเปก — lock GAIT_ANALYZE_EVERY_SAMPLES=40', () => {
+  assert.equal(GAIT_ANALYZE_EVERY_SAMPLES, 40,
+    'ห้ามเปลี่ยนหลัง validate campaign โดยไม่รัน pilot ใหม่');
+  const trace = buildDemoTrace({ numStrides: 8, side: 'R', seed: 11 });
+  const def = reprocessImuTrace(trace);
+  const explicit = reprocessImuTrace(trace, { analyzeEvery: GAIT_ANALYZE_EVERY_SAMPLES });
+  const keySig = (r) => r.bySide.R.filter((c) => !c.isOpenStride).map((c) => c.cycleKey).sort().join(',');
+  assert.equal(keySig(def), keySig(explicit), 'default ต้องใช้ GAIT_ANALYZE_EVERY_SAMPLES');
 });
 
 test('🟠 reprocess: stancePct ต้อง upgrade จาก null เป็นค่าเมื่อ temporal resolve', () => {
@@ -193,7 +238,7 @@ test('compareMocapToImu: ไม่มี samples แต่มี cycles[] — in
       },
     },
     bilateral: { sameSideRepeats: 0 },
-    session: { pelvisNetForwardDisplacementM: 2.0 },
+    session: { pelvisNetForwardDisplacementM: 2.0, pelvisNetMeaningful: true, forwardAxisMethod: 'net-start-end' },
   };
   const imuTrace = {
     samples: [],
@@ -222,13 +267,25 @@ test('compareMocapToImu: ไม่มีข้อมูล IMU เลย → ok=
   assert.equal(report.ok, false);
 });
 
-test('summarizeImuSide: นับ clamped', () => {
+test('🔴 resolveOverlappingImuCycles: เก็บอันสั้น ตัด double-stride ทับซ้อน', () => {
+  const entries = [
+    { cycleKey: 'a', cycleStartTimeS: 1.0, strideTimeS: 3.25, isOpenStride: false, strideLengthM: 1.8 },
+    { cycleKey: 'b', cycleStartTimeS: 2.5, strideTimeS: 1.75, isOpenStride: false, strideLengthM: 1.1 },
+  ];
+  const out = resolveOverlappingImuCycles(entries);
+  assert.equal(out.length, 1);
+  assert.equal(out[0].cycleKey, 'b');
+});
+
+test('🔴 summarizeImuSide: ไม่นับ open เป็น cycleCount', () => {
   const summary = summarizeImuSide([
-    { strideLengthM: 1, strideLengthClamped: true },
-    { strideLengthM: 1.1, strideLengthClamped: false },
+    { strideLengthM: 1, isOpenStride: false, strideLengthClamped: false },
+    { strideLengthM: null, isOpenStride: true, strideLengthClamped: false },
+    { strideLengthM: 1.1, isOpenStride: false, strideLengthClamped: true },
   ]);
-  assert.equal(summary.clampedCount, 1);
   assert.equal(summary.cycleCount, 2);
+  assert.equal(summary.openStrideCount, 1);
+  assert.equal(summary.clampedCount, 1);
 });
 
 test('🔴 reprocess: cycleStartTimeS reproducible ข้ามรอบ (relative board clock)', () => {
@@ -251,7 +308,7 @@ test('🔴 distanceBySide: ขาที่ไม่มี cycle ต้องเ�
       R: { cycles: [] },
     },
     bilateral: { sameSideRepeats: 0 },
-    session: { pelvisNetForwardDisplacementM: 1 },
+    session: { pelvisNetForwardDisplacementM: 1, pelvisNetMeaningful: true, forwardAxisMethod: 'net-start-end' },
   };
   const imuTrace = {
     samples: [],
@@ -319,6 +376,45 @@ test('🔴 estimateHsTimeLagS: มี coarseLag → จับ lag ใหญ่�
     assert.equal(result.ok, true, `trueLag=${trueLag} reason=${result.reason}`);
     assert.ok(Math.abs(result.lagS - trueLag) < 0.05, `ได้ ${result.lagS} want ${trueLag}`);
   }
+});
+
+test('🔴 estimateHsTimeLagS: step บน i อย่างเดียว — ไม่พลาด lag ที่ c ไม่หาร step', () => {
+  // 30 MoCap HS + IMU มี HS เกิน 3 ตอนต้น → length=33 → step=floor(33/12)=2
+  // lag จริง 8.0; ถ้า step ทั้ง i,j จะพลาด candidate แล้วได้ alias 7.0
+  const stride = 1.0;
+  const mocap = Array.from({ length: 30 }, (_, i) => ({ hsStartTimeS: i * stride }));
+  const trueLag = 8.0;
+  const extra = [0.2, 0.5, 0.8].map((t) => ({ cycleStartTimeS: t }));
+  const imu = [
+    ...extra,
+    ...mocap.map((c) => ({ cycleStartTimeS: c.hsStartTimeS + trueLag })),
+  ];
+  assert.equal(imu.length, 33);
+  const result = estimateHsTimeLagS(mocap, imu, {
+    coarseLagS: trueLag,
+    rivalScanMaxLagS: 12,
+    matchToleranceS: 0.40,
+  });
+  assert.ok(Math.abs(result.lagS - trueLag) < 0.05, `ได้ ${result.lagS} want ${trueLag}`);
+  assert.equal(result.ok, true);
+});
+
+test('🔴 estimateHsTimeLagS: periodAliasRisk + coarse → ok จับคู่ได้ แต่ agreement ต้องตัด', () => {
+  const stride = 1.0;
+  const mocap = Array.from({ length: 30 }, (_, i) => ({ hsStartTimeS: i * stride }));
+  const trueLag = 8.0;
+  const imu = [
+    ...[0.2, 0.5, 0.8].map((t) => ({ cycleStartTimeS: t })),
+    ...mocap.map((c) => ({ cycleStartTimeS: c.hsStartTimeS + trueLag })),
+  ];
+  const result = estimateHsTimeLagS(mocap, imu, {
+    coarseLagS: trueLag,
+    rivalScanMaxLagS: 12,
+    matchToleranceS: 0.40,
+  });
+  // stride คงที่เป๊ะ → rivals ที่ ±1s มักมี — periodAliasRisk ต้อง flag
+  assert.equal(result.periodAliasRisk, true);
+  assert.equal(result.ok, true, 'coarse ยังอนุญาต exploratory pairing');
 });
 
 test('🔴 pairCyclesByTime: HS alias → ไม่จับคู่ (ดีกว่าคู่ผิด stride)', () => {
@@ -500,6 +596,53 @@ test('🔴 estimateSignalLagS: --lag บังคับ sync', () => {
   assert.ok(result.peakCorr > 0.9);
 });
 
+test('🔴 estimateSignalLagS: --lag ใหญ่กว่า overlap ดิบยังตรวจ corr ได้', () => {
+  // MoCap สั้น ~12s; IMU ยาวกว่าและเลื่อน 8s — overlap ดิบไม่ครอบคลุม lag แต่หน้าต่างเลื่อนต้องได้ corr
+  const dt = 0.01;
+  const mocapN = Math.round(12 / dt);
+  const imuN = Math.round(25 / dt);
+  const mocapT = Array.from({ length: mocapN }, (_, i) => i * dt);
+  const imuT = Array.from({ length: imuN }, (_, i) => i * dt);
+  const lag = 8.0;
+  const mocapY = mocapT.map((x) => gaitLike(x, 1.1));
+  const imuY = imuT.map((x) => gaitLike(x - lag, 1.1));
+  const result = estimateSignalLagS(mocapT, mocapY, imuT, imuY, { lagS: lag, dtS: dt });
+  assert.equal(result.ok, true, `reason=${result.reason} corr=${result.peakCorr}`);
+  assert.ok(Number.isFinite(result.peakCorr) && result.peakCorr >= 0.5);
+});
+
+test('🔴 estimateSignalLagS: rivalScan ไม่ถูกตัดที่ overlap/3', () => {
+  const dt = 0.02;
+  const mocapN = Math.round(6 / dt);
+  const imuN = Math.round(20 / dt);
+  const mocapT = Array.from({ length: mocapN }, (_, i) => i * dt);
+  const imuT = Array.from({ length: imuN }, (_, i) => i * dt);
+  const lag = 5.5;
+  const mocapY = mocapT.map((x) => gaitLike(x, 1.1));
+  const imuY = imuT.map((x) => gaitLike(x - lag, 1.1));
+  const result = estimateSignalLagS(mocapT, mocapY, imuT, imuY, {
+    coarseLagS: lag,
+    dtS: dt,
+    rivalScanMaxLagS: 8,
+  });
+  assert.equal(result.ok, true, `reason=${result.reason} lag=${result.lagS}`);
+  assert.ok(Math.abs(result.lagS - lag) < 0.15, `ได้ ${result.lagS}`);
+});
+
+test('🔴 compareMocapToImu: hs-event-circular → explorationOnly ไม่ publishable', () => {
+  const trace = buildDemoTrace({ numStrides: 6, side: 'R', seed: 11 });
+  const imu = reprocessImuTrace(trace);
+  const mocap = fakeMocapFromImuCycles(imu.bySide.R, 'R');
+  const report = compareMocapToImu(mocap, trace, {
+    align: { lagS: 0, lagSource: 'hs-event-circular', lagTrusted: false },
+    minAgreementPairs: 1,
+    explorationOnly: true,
+  });
+  assert.equal(report.explorationOnly, true);
+  assert.equal(report.validationPublishable, false);
+  assert.equal(report.sides.R.validationPublishable, false);
+});
+
 test('🔴 estimateSignalLagS: กลับขั้ว → polarity-mismatch', () => {
   const dt = 0.005;
   const n = 2000;
@@ -508,6 +651,46 @@ test('🔴 estimateSignalLagS: กลับขั้ว → polarity-mismatch', 
   const inverted = estimateSignalLagS(t, y, t, y.map((v) => -v), { coarseLagS: 0, dtS: dt });
   assert.equal(inverted.ok, false);
   assert.equal(inverted.reason, 'polarity-mismatch');
+});
+
+test('🔴 estimateSignalLagS: useEnvelope ผ่านเมื่อ signed polarity พัง', () => {
+  const dt = 0.005;
+  const n = 2000;
+  const lag = 0.12;
+  const t = Array.from({ length: n }, (_, i) => i * dt);
+  const y = t.map((tt) => gaitLike(tt, 1.0));
+  const invertedShifted = t.map((tt) => -gaitLike(tt - lag, 1.0));
+  const signed = estimateSignalLagS(t, y, t, invertedShifted, { coarseLagS: lag, dtS: dt });
+  assert.equal(signed.ok, false);
+  assert.equal(signed.reason, 'polarity-mismatch');
+  const env = estimateSignalLagS(t, y, t, invertedShifted, {
+    coarseLagS: lag,
+    dtS: dt,
+    useEnvelope: true,
+  });
+  assert.equal(env.ok, true, env.reason);
+  assert.equal(env.useEnvelope, true);
+  assert.ok(Math.abs(env.lagS - lag) < 0.03, `lag=${env.lagS}`);
+  assert.ok(env.peakCorr > 0.85, `corr=${env.peakCorr}`);
+});
+
+test('🔴 estimateSignalLagS: useEnvelope หา lag ใหญ่ได้โดยไม่มี onset (ไม่หลง peak ใกล้ 0)', () => {
+  const dt = 0.02;
+  const n = 1200; // 24 s
+  const lag = 2.40;
+  const t = Array.from({ length: n }, (_, i) => i * dt);
+  // AM envelope ไม่ใช่คาบเดียว — กัน period alias ใกล้ 0
+  const am = (tt) => (0.55 + 0.45 * Math.sin(2 * Math.PI * 0.07 * tt));
+  const y = t.map((tt) => am(tt) * gaitLike(tt, 1.1));
+  const shifted = t.map((tt) => am(tt - lag) * gaitLike(tt - lag, 1.1));
+  const env = estimateSignalLagS(t, y, t, shifted, {
+    dtS: dt,
+    rivalScanMaxLagS: 5,
+    useEnvelope: true,
+  });
+  assert.equal(env.ok, true, env.reason);
+  assert.ok(Math.abs(env.lagS - lag) < 0.08, `lag=${env.lagS} expected~${lag}`);
+  assert.ok(env.peakCorr > 0.8, `corr=${env.peakCorr}`);
 });
 
 test('🔴 estimateSignalLagS: กลับขั้ว+lag ไม่เงียบ flip', () => {

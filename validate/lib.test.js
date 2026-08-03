@@ -145,9 +145,54 @@ test('computeDistanceCheck: รวม strideLengthM ต่อเซนเซอ�
   assert.equal(result.hasCheck, true);
   const left = result.perSensor.find((p) => p.sensorKey === 'LEFT_SHANK');
   assert.ok(Math.abs(left.sumStrideLengthM - 2.0) < 1e-9);
+  assert.ok(Math.abs(left.sumStrideLengthCleanM - 2.0) < 1e-9);
   assert.ok(Math.abs(left.errorPct - 0) < 1e-9, 'sum ตรงกับ ground truth เป๊ะ = error 0%');
   const right = result.perSensor.find((p) => p.sensorKey === 'RIGHT_SHANK');
   assert.ok(Math.abs(right.errorPct - -55) < 1e-9, '0.9 vs 2.0 -> -55%');
+});
+
+test('🔴 computeDistanceCheck: gate ใช้ clean — ตัด clamp ออกจาก errorPct', () => {
+  const cycles = [
+    cycle({ sensorKey: 'LEFT_SHANK', strideLengthM: 1.0, strideLengthClamped: false }),
+    cycle({ sensorKey: 'LEFT_SHANK', strideLengthM: 1.8, strideLengthClamped: true }),
+  ];
+  const result = computeDistanceCheck({ cycles, groundTruth: { distanceM: 2.0 } });
+  const left = result.perSensor.find((p) => p.sensorKey === 'LEFT_SHANK');
+  assert.ok(Math.abs(left.sumStrideLengthM - 2.8) < 1e-9);
+  assert.ok(Math.abs(left.sumStrideLengthCleanM - 1.0) < 1e-9);
+  assert.equal(left.excludedClampedCount, 1);
+  assert.ok(Math.abs(left.errorPct - -50) < 1e-9, 'gate ใช้ clean 1.0 vs 2.0 = -50%');
+});
+
+test('🔴 computeDistanceCheck: coverage gap → errorPct=null (distance gate ปฏิเสธ)', () => {
+  const t0 = 1_000_000;
+  const cycles = [
+    cycle({
+      sensorKey: 'LEFT_SHANK',
+      side: 'L',
+      strideLengthM: 1.0,
+      cycleStartTimestampMs: t0,
+      cycleEndTimestampMs: t0 + 1000,
+    }),
+    // gap 1.5s แล้วค่อย stride ถัดไป
+    cycle({
+      sensorKey: 'LEFT_SHANK',
+      side: 'L',
+      strideLengthM: 1.0,
+      cycleStartTimestampMs: t0 + 2500,
+      cycleEndTimestampMs: t0 + 3500,
+    }),
+  ];
+  const result = computeDistanceCheck({
+    cycles,
+    samples: [{ t_ms: t0 }],
+    groundTruth: { distanceM: 2.0 },
+  });
+  const left = result.perSensor.find((p) => p.sensorKey === 'LEFT_SHANK');
+  assert.equal(left.hasCoverageGap, true);
+  assert.equal(left.distanceGateOk, false);
+  assert.equal(left.errorPct, null);
+  assert.ok(left.coverageGapS > 1.0);
 });
 
 test('regression: cycle ที่ strideLengthM เป็น null ต้องไม่ถูกนับเป็น 0 ในผลรวมระยะ (แยกเป็น noDataCount)', () => {

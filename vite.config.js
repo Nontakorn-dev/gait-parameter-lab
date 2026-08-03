@@ -14,6 +14,7 @@ export default defineConfig({
         main: resolve(__dirname, 'index.html'),
         debug: resolve(__dirname, 'debug/index.html'),
         validate: resolve(__dirname, 'validate/index.html'),
+        compare: resolve(__dirname, 'compare/index.html'),
       },
     },
   },

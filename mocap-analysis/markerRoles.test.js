@@ -14,9 +14,13 @@ test('resolveMarkerRoles: auto-match ชื่อมาตรฐานครบ 
   ];
   const { resolved, ok } = resolveMarkerRoles(markers);
   assert.equal(ok, true);
-  assert.deepEqual(resolved, {
-    L_ASIS: 1, R_ASIS: 2, L_Knee: 3, R_Knee: 4, L_Ankle: 5, R_Ankle: 6,
-  });
+  // อาจได้ ForHS/ForAngle จาก auto-match ชื่อ ankle ด้วย — legacy ต้องครบ
+  assert.equal(resolved.L_ASIS, 1);
+  assert.equal(resolved.R_ASIS, 2);
+  assert.equal(resolved.L_Knee, 3);
+  assert.equal(resolved.R_Knee, 4);
+  assert.equal(resolved.L_Ankle, 5);
+  assert.equal(resolved.R_Ankle, 6);
 });
 
 test('resolveMarkerRoles: รองรับชื่อย่อ LASI/RKNE/LANK', () => {
@@ -38,7 +42,31 @@ test('resolveMarkerRoles: Marker-N generic ต้อง fail ดัง (ไม�
   const markers = Array.from({ length: 6 }, (_, i) => ({ id: i + 1, name: `Marker-${i + 1}` }));
   const { ok, unresolved } = resolveMarkerRoles(markers);
   assert.equal(ok, false);
-  assert.equal(unresolved.length, ROLES.length);
+  assert.ok(unresolved.length >= 6, `ต้อง fail core+ankle ได้ ${unresolved.length}`);
+});
+
+test('resolveMarkerRoles: AnkleForHS อย่างเดียวพอ (ไม่มี ForAngle)', () => {
+  const markers = Array.from({ length: 8 }, (_, i) => ({ id: i + 1, name: `Marker-${i + 1}` }));
+  const { ok, resolved, anklePlan } = resolveMarkerRoles(markers, {
+    L_ASIS: 1, L_Knee: 2, L_AnkleForHS: 6,
+    R_ASIS: 7, R_Knee: 8, R_AnkleForHS: 4,
+  });
+  assert.equal(ok, true);
+  assert.equal(resolved.L_AnkleForHS, 6);
+  assert.equal(anklePlan.L.angleSource, 'unavailable');
+  assert.equal(anklePlan.L.hsRole, 'L_AnkleForHS');
+});
+
+test('resolveMarkerRoles: แยก ForHS (heel) กับ ForAngle (malleolus)', () => {
+  const markers = Array.from({ length: 10 }, (_, i) => ({ id: i + 1, name: `Marker-${i + 1}` }));
+  const { ok, anklePlan } = resolveMarkerRoles(markers, {
+    L_ASIS: 1, L_Knee: 2, L_AnkleForHS: 6, L_AnkleForAngle: 9,
+    R_ASIS: 7, R_Knee: 8, R_AnkleForHS: 4, R_AnkleForAngle: 10,
+  });
+  assert.equal(ok, true);
+  assert.equal(anklePlan.L.hsRole, 'L_AnkleForHS');
+  assert.equal(anklePlan.L.angleRole, 'L_AnkleForAngle');
+  assert.equal(anklePlan.L.angleSource, 'malleolus');
 });
 
 test('resolveMarkerRoles: overrideMap มี priority สูงกว่าชื่อ', () => {

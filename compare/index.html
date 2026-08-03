@@ -1,0 +1,172 @@
+<!doctype html>
+<html lang="th">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Gait Compare — MoCap ↔ IMU</title>
+  <link rel="stylesheet" href="style.css" />
+</head>
+<body>
+  <header class="top">
+    <div class="top__brand">
+      <p class="top__eyebrow">Gait Parameter Lab</p>
+      <h1>Gait Compare</h1>
+      <p class="top__sub">ดูค่า gait ทุกตัวที่คำนวณได้ · กราฟ ω เช็ครูปร่าง · คุณภาพเป็นแค่ note</p>
+    </div>
+    <nav class="top__nav">
+      <a href="/">Dashboard</a>
+      <a href="/validate/">Validate</a>
+      <a href="/debug/">Swing</a>
+    </nav>
+  </header>
+
+  <main class="shell">
+    <section class="panel upload">
+      <div class="drop" id="csvDrop" tabindex="0">
+        <input type="file" id="csvInput" accept=".csv,text/csv" hidden />
+        <span class="drop__tag">1</span>
+        <div>
+          <strong>MoCap CSV</strong>
+          <p>OptiTrack Motive export</p>
+        </div>
+        <span class="drop__file" id="csvName">ยังไม่เลือก</span>
+      </div>
+      <div class="drop" id="jsonDrop" tabindex="0">
+        <input type="file" id="jsonInput" accept=".json,application/json" hidden />
+        <span class="drop__tag">2</span>
+        <div>
+          <strong>IMU Trace JSON</strong>
+          <p>จาก Dashboard → Export</p>
+        </div>
+        <span class="drop__file" id="jsonName">ยังไม่เลือก</span>
+      </div>
+    </section>
+
+    <section class="panel map" id="mapPanel">
+      <div class="panel__head">
+        <h2>แมป Marker 1–8</h2>
+        <p>เลือกตำแหน่งแบบที่เรียกในแลป — ต้องครบ สะโพก / เข่า / ส้นเท้า ซ้าย-ขวา</p>
+      </div>
+      <div class="presets">
+        <button type="button" class="chip" data-preset="test1">Test1 (ตาม position.md)</button>
+        <button type="button" class="chip" data-preset="test2">Test2 (Heel สลับ L/R)</button>
+        <button type="button" class="chip" data-preset="clear">ล้าง</button>
+      </div>
+      <div class="map-grid" id="mapGrid"></div>
+      <p class="map-status" id="mapStatus">อัปโหลด CSV เพื่อเห็น marker จริงในไฟล์</p>
+    </section>
+
+    <section class="panel controls">
+      <label>
+        ขา
+        <select id="sideSelect">
+          <option value="L">L</option>
+          <option value="R">R</option>
+        </select>
+      </label>
+      <label>
+        แกน IMU (กราฟ)
+        <select id="axisSelect">
+          <option value="gx">gx (หลัก)</option>
+          <option value="gy">gy</option>
+          <option value="gz">gz</option>
+        </select>
+      </label>
+      <label class="check">
+        <input type="checkbox" id="envelopeCheck" checked />
+        |ω| envelope
+      </label>
+      <button type="button" class="primary" id="runBtn" disabled>คำนวณ &amp; เทียบ</button>
+      <span class="run-hint" id="runHint">อัปโหลดครบ + แมปครบก่อน</span>
+    </section>
+
+    <section class="panel report hidden" id="reportPanel">
+      <div class="panel__head">
+        <h2>Gait parameters</h2>
+        <p id="paramMeta">ค่าเฉลี่ยต่อข้าง + รายก้าว — ดูตัวเลขที่คำนวณได้ทั้งหมด</p>
+      </div>
+      <div class="stat-row" id="statRow"></div>
+      <div class="table-wrap" style="margin-top:0.75rem">
+        <table id="paramTable">
+          <thead>
+            <tr>
+              <th>พารามิเตอร์</th>
+              <th>MoCap</th>
+              <th>IMU</th>
+              <th>Δ</th>
+              <th>Δ %</th>
+            </tr>
+          </thead>
+          <tbody></tbody>
+        </table>
+      </div>
+
+      <h3 class="subhead">รายก้าวที่จับคู่ได้ (หลัง sync เวลา)</h3>
+      <div class="table-wrap">
+        <table id="strideTable">
+          <thead>
+            <tr>
+              <th>#</th>
+              <th>MoCap HS (s)</th>
+              <th>IMU HS (s)</th>
+              <th>Δt (s)</th>
+              <th>MoCap stride</th>
+              <th>IMU stride</th>
+              <th>MoCap cad</th>
+              <th>IMU cad</th>
+              <th>MoCap stance%</th>
+              <th>IMU stance%</th>
+            </tr>
+          </thead>
+          <tbody></tbody>
+        </table>
+      </div>
+
+      <h3 class="subhead">ทุก cycle ที่คำนวณได้ (ไม่ต้องจับคู่)</h3>
+      <div class="cycle-grid">
+        <div class="table-wrap">
+          <table id="mocapCycleTable">
+            <thead>
+              <tr><th colspan="6">MoCap</th></tr>
+              <tr>
+                <th>#</th><th>HS (s)</th><th>stride</th><th>cad</th><th>stance%</th><th>peak°</th>
+              </tr>
+            </thead>
+            <tbody></tbody>
+          </table>
+        </div>
+        <div class="table-wrap">
+          <table id="imuCycleTable">
+            <thead>
+              <tr><th colspan="6">IMU</th></tr>
+              <tr>
+                <th>#</th><th>HS (s)</th><th>stride</th><th>cad</th><th>stance%</th><th>flags</th>
+              </tr>
+            </thead>
+            <tbody></tbody>
+          </table>
+        </div>
+      </div>
+
+      <details class="notes" id="notesDetails">
+        <summary>Notes / warnings (คุณภาพ · ไม่บล็อกการดูค่า)</summary>
+        <div class="warn-list" id="warnList"></div>
+      </details>
+    </section>
+
+    <section class="panel chart-panel hidden" id="chartPanel">
+      <div class="panel__head row">
+        <div>
+          <h2>กราฟ ω (เช็ครูปร่าง)</h2>
+          <p id="syncMeta">—</p>
+        </div>
+      </div>
+      <div class="chart-wrap">
+        <canvas id="omegaChart"></canvas>
+      </div>
+    </section>
+  </main>
+
+  <script type="module" src="./app.js"></script>
+</body>
+</html>

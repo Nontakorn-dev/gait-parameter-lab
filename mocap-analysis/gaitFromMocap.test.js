@@ -3,7 +3,7 @@ import assert from 'node:assert/strict';
 
 import { parseOptiTrackCsv, listMarkers } from './parseOptiTrack.js';
 import { resolveMarkerRoles } from './markerRoles.js';
-import { computeGaitFromMocap, computeForwardAxis, computeShankAngleDeg, computeAngularVelocityDps } from './gaitFromMocap.js';
+import { computeGaitFromMocap, computeForwardAxis, computeShankAngleDeg, computeAngularVelocityDps, computeFilteredAngularVelocityDps } from './gaitFromMocap.js';
 import { FIXTURE, buildSyntheticCsv } from './testFixtures.js';
 
 test('computeForwardAxis: pelvis เดินตรงไปตามแกน +X ต้องได้ fx≈1, fz≈0', () => {
@@ -17,6 +17,17 @@ test('computeForwardAxis: pelvis เดินตรงไปตามแกน +
 
 test('computeForwardAxis: throw ถ้าระยะทางเดินสุทธิสั้นเกินไป (< 0.3m)', () => {
   assert.throws(() => computeForwardAxis([0, 0.05, 0.1], [0, 0, 0]));
+});
+
+test('computeForwardAxis: เดินไป-กลับ (net≈0) ใช้ทิศไปจุดไกลสุด', () => {
+  // ออกไปตาม +Z แล้วกลับมาจุดเริ่ม
+  const pelvisX = [0, 0.05, 0.1, 0.05, 0];
+  const pelvisZ = [0, 0.7, 1.4, 0.7, 0.02];
+  const axis = computeForwardAxis(pelvisX, pelvisZ);
+  assert.equal(axis.method, 'max-excursion');
+  assert.ok(axis.fz > 0.9, `ควรชี้ +Z ได้ fz=${axis.fz}`);
+  assert.ok(axis.maxExcursionM > 1.0);
+  assert.ok(axis.netDisplacementM < 0.3);
 });
 
 test('computeShankAngleDeg + computeAngularVelocityDps: round-trip กลับมุมที่ป้อนเข้าไปได้ถูกต้อง', () => {
@@ -59,7 +70,9 @@ test('end-to-end: parse CSV จริง -> resolve role จากชื่อ -
 
   const { resolved, ok, unresolved } = resolveMarkerRoles(markers);
   assert.equal(ok, true, `resolve ไม่ครบ: ${JSON.stringify(unresolved)}`);
-  assert.deepEqual(Object.keys(resolved).sort(), ['L_ASIS', 'L_Ankle', 'L_Knee', 'R_ASIS', 'R_Ankle', 'R_Knee'].sort());
+  for (const role of ['L_ASIS', 'L_Ankle', 'L_Knee', 'R_ASIS', 'R_Ankle', 'R_Knee']) {
+    assert.ok(Number.isFinite(resolved[role]), `ต้องมี ${role}`);
+  }
 
   const result = computeGaitFromMocap(parsed, resolved);
 
@@ -106,13 +119,58 @@ test('end-to-end: parse CSV จริง -> resolve role จากชื่อ -
   assert.ok(Math.abs(result.bilateral.trueCadenceSpm - FIXTURE.EXPECTED_CADENCE_SPM) < 3,
     `trueCadenceSpm=${result.bilateral.trueCadenceSpm} ควรใกล้ ${FIXTURE.EXPECTED_CADENCE_SPM.toFixed(1)} (สมมาตรสมบูรณ์แบบ)`);
   assert.equal(result.bilateral.sameSideRepeats, 0, 'gait สลับซ้าย-ขวาสมบูรณ์แบบ ไม่ควรมี same-side ติดกัน');
+  assert.equal(result.bilateral.reliable, true);
 
   // --- session summary สมเหตุสมผล ---
+  assert.equal(result.session.forwardAxisMethod, 'net-start-end');
+  assert.equal(result.session.pelvisNetMeaningful, true);
   assert.ok(Math.abs(result.session.averageWalkingSpeedMps - FIXTURE.WALK_SPEED_MPS) < 0.1,
     `averageWalkingSpeedMps=${result.session.averageWalkingSpeedMps} ควรใกล้ ${FIXTURE.WALK_SPEED_MPS.toFixed(2)}`);
 
   assert.equal(result.meta.unitScale, 1);
   assert.ok(Array.isArray(result.meta.warnings));
+});
+
+test('🔴 session: max-excursion → ปิด averageWalkingSpeed จาก net', () => {
+  // เดินไป-กลับสุทธิ ~0 แต่ excursion ใหญ่
+  const pelvisX = Array.from({ length: 50 }, (_, i) => {
+    const phase = i / 49;
+    return phase < 0.5 ? phase * 0.1 : (1 - phase) * 0.1;
+  });
+  const pelvisZ = Array.from({ length: 50 }, (_, i) => {
+    const phase = i / 49;
+    return phase < 0.5 ? phase * 2.8 : (1 - phase) * 2.8;
+  });
+  const axis = computeForwardAxis(pelvisX, pelvisZ);
+  assert.equal(axis.method, 'max-excursion');
+  // จำลอง session gate เดียวกับ computeGaitFromMocap
+  const netMeaningful = axis.method === 'net-start-end';
+  assert.equal(netMeaningful, false);
+});
+
+test('🔴 computeFilteredAngularVelocityDps: กรองก่อน dif ลด jitter', () => {
+  const dt = 1 / 120;
+  const n = 600;
+  const t = Array.from({ length: n }, (_, i) => i * dt);
+  // มุม gait-like + noise สูงความถี่ (จำลอง marker jitter ~±2°)
+  const angleDeg = t.map((tt, i) => {
+    const base = 25 * Math.sin(2 * Math.PI * tt / 1.1);
+    const noise = 2.0 * Math.sin(2 * Math.PI * 40 * tt) + ((i * 17) % 5 - 2) * 0.4;
+    return base + noise;
+  });
+  const raw = computeAngularVelocityDps(t, angleDeg);
+  const filtered = computeFilteredAngularVelocityDps(t, angleDeg, { cutoffHz: 6, sampleRateHz: 120 });
+  const medAbs = (arr) => {
+    const d = [];
+    for (let i = 1; i < arr.length; i += 1) {
+      if (Number.isFinite(arr[i]) && Number.isFinite(arr[i - 1])) d.push(Math.abs(arr[i] - arr[i - 1]));
+    }
+    d.sort((a, b) => a - b);
+    return d[Math.floor(d.length / 2)];
+  };
+  const rawJ = medAbs(raw);
+  const filJ = medAbs(filtered.shankAngularVelocityDps);
+  assert.ok(filJ < rawJ * 0.7, `filtered jitter ${filJ} ควรน้อยกว่า raw ${rawJ} อย่างชัด`);
 });
 
 test('🟡 units: ไฟล์ mm ถูก auto-scale เป็นเมตร', () => {

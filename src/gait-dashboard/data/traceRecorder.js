@@ -113,6 +113,10 @@ export class TraceRecorder {
     if (!this.recording || !cycleDiagnostic) {
       return;
     }
+    // retract ต้องผ่าน retractCycle() — อย่า push marker เข้า cycles[] (จะถูกนับเป็น cycle)
+    if (cycleDiagnostic.retracted) {
+      return this.retractCycle(cycleDiagnostic.cycleKey);
+    }
     // เดินเกินระยะ cap (>5 ชม. ต่อเนื่อง) ไม่น่าเกิด แต่ mark ไว้เหมือน record() แทนที่จะ
     // ทิ้ง cycle เงียบ ๆ — สอดคล้องปรัชญา "ไม่ตัดข้อมูลแบบเงียบ" เดียวกับ strideLengthClamped.
     // ไม่หยุด recording ทั้งหมดเหมือน record() เพราะ raw sample ยังมีค่าต่อให้ cycle cap แล้ว
@@ -121,6 +125,21 @@ export class TraceRecorder {
       return;
     }
     this.cycles.push(cycleDiagnostic);
+  }
+
+  /**
+   * ลบ cycle ที่ถูกแทนที่ (overlap retract) ออกจาก this.cycles จริง
+   * — กรองตอน export ไม่พอ เพราะตัวเก่าถูก recordCycle ไปแล้ว
+   * @returns {number} จำนวนรายการที่ลบ
+   */
+  retractCycle(cycleKey) {
+    if (!this.recording || cycleKey == null) {
+      return 0;
+    }
+    const key = String(cycleKey);
+    const before = this.cycles.length;
+    this.cycles = this.cycles.filter((c) => String(c?.cycleKey) !== key);
+    return before - this.cycles.length;
   }
 
   // วัด sample rate จริงจาก timestamp ต่อเซนเซอร์ (median ของ 1/Δt) — ไม่ใช้ค่า nominal ลอย ๆ

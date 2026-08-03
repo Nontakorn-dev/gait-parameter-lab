@@ -7,8 +7,17 @@ function averageValues(values) {
   return numericValues.reduce((total, value) => total + value, 0) / numericValues.length;
 }
 
-function normalizeParamEntries(entries = []) {
-  return entries.map((entry) => (entry?.params ? entry : { params: entry }));
+/**
+ * รับทั้ง { params } และ params ดิบ — กรอง params=null ออก (อย่าห่อทั้ง entry เป็น params)
+ */
+export function normalizeParamEntries(entries = []) {
+  return (entries || []).flatMap((entry) => {
+    if (entry == null) return [];
+    if (Object.prototype.hasOwnProperty.call(entry, 'params')) {
+      return entry.params == null ? [] : [entry];
+    }
+    return [{ params: entry }];
+  });
 }
 
 /**

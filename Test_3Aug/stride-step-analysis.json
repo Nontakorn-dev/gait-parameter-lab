@@ -1,0 +1,188 @@
+{
+  "generatedAt": "2026-08-03T15:10:09.514Z",
+  "note": "Stride: เทียบ MoCap vs IMU จากคู่ HS หลัง sync. Step length: มีจาก MoCap (ระยะ marker ส้นเท้า HS→HS ข้างตรงข้าม). IMU step length = null — ห้าม stride/2 จากเซนเซอร์ข้างเดียว. Step time: เทียบได้เมื่อจับคู่ HS สลับข้างหลัง sync",
+  "tests": {
+    "Test1": {
+      "lagS": 50.68484832092955,
+      "lagBySide": {
+        "L": 53.41,
+        "R": 50.23
+      },
+      "stridePairs": [
+        {
+          "side": "L",
+          "mocapHsS": 2.24166667,
+          "imuHsS": 55.740005000000004,
+          "mocapStrideM": 0.49470771509189515,
+          "imuStrideM": 1.1572033521774348,
+          "errM": 0.6624956370855396,
+          "errPct": 133.916576773515,
+          "usable": true
+        },
+        {
+          "side": "L",
+          "mocapHsS": 4.05,
+          "imuHsS": 57.46,
+          "mocapStrideM": 0.1113157459353814,
+          "imuStrideM": 0.22729006320854558,
+          "errM": 0.11597431727316418,
+          "errPct": 104.18500662115409,
+          "usable": false
+        },
+        {
+          "side": "L",
+          "mocapHsS": 5.64166667,
+          "imuHsS": 58.88,
+          "mocapStrideM": 0.21738478395075855,
+          "imuStrideM": 0.5110255570395658,
+          "errM": 0.2936407730888072,
+          "errPct": 135.0788071511583,
+          "usable": false
+        },
+        {
+          "side": "L",
+          "mocapHsS": 7.025,
+          "imuHsS": 60.47,
+          "mocapStrideM": 0.8844124669449536,
+          "imuStrideM": null,
+          "errM": null,
+          "errPct": null,
+          "usable": false
+        },
+        {
+          "side": "R",
+          "mocapHsS": 1.31666667,
+          "imuHsS": 51.440122,
+          "mocapStrideM": 0.9037589668887167,
+          "imuStrideM": 0.1,
+          "errM": -0.8037589668887167,
+          "errPct": -88.93510286882571,
+          "usable": false
+        },
+        {
+          "side": "R",
+          "mocapHsS": 6.24166667,
+          "imuHsS": 56.47004800000001,
+          "mocapStrideM": 0.5023700621766034,
+          "imuStrideM": 1.8,
+          "errM": 1.2976299378233966,
+          "errPct": 258.30160583240075,
+          "usable": true
+        }
+      ],
+      "strideAgreement": {
+        "nUsable": 2,
+        "nAll": 6,
+        "meanErrorM": 0.9800627874544681,
+        "maeM": 0.9800627874544681,
+        "rmseM": 1.0302290824600437,
+        "meanErrorPct": 196.1090913029579,
+        "mocapMeanStrideM": 0.4985388886342493,
+        "imuMeanStrideM": 1.4786016760887173
+      },
+      "mocapSteps": [],
+      "mocapStepsHiddenReason": "bilateral.reliable=false (sameSideRepeats=3) — ซ่อนตาราง step",
+      "bilateralReliable": false,
+      "sameSideRepeats": 3,
+      "pelvisMaxExcursionM": 1.3821479503399976,
+      "pelvisNetMeaningful": false,
+      "mocapStepSummary": {
+        "n": 0,
+        "meanStepLengthM": null,
+        "meanStepTimeS": null
+      },
+      "stepTimePairs": []
+    },
+    "Test2": {
+      "lagS": 3.1602961053451293,
+      "lagBySide": {
+        "L": 5.94,
+        "R": 6.96
+      },
+      "stridePairs": [
+        {
+          "side": "L",
+          "mocapHsS": 0,
+          "imuHsS": 5.940310000000056,
+          "mocapStrideM": 0.3379934594566123,
+          "imuStrideM": null,
+          "errM": null,
+          "errPct": null,
+          "usable": false
+        },
+        {
+          "side": "L",
+          "mocapHsS": 7.69166667,
+          "imuHsS": 13.569929000000004,
+          "mocapStrideM": 0.04544959660363479,
+          "imuStrideM": 0.312450047626443,
+          "errM": 0.2670004510228082,
+          "errPct": 587.4649523323934,
+          "usable": false
+        },
+        {
+          "side": "L",
+          "mocapHsS": 9.1,
+          "imuHsS": 15.249935999999988,
+          "mocapStrideM": 0.2604542810264303,
+          "imuStrideM": null,
+          "errM": null,
+          "errPct": null,
+          "usable": false
+        },
+        {
+          "side": "R",
+          "mocapHsS": 0,
+          "imuHsS": 6.870003999999957,
+          "mocapStrideM": 0.6494066479317631,
+          "imuStrideM": null,
+          "errM": null,
+          "errPct": null,
+          "usable": false
+        },
+        {
+          "side": "R",
+          "mocapHsS": 4.16666667,
+          "imuHsS": 11.129998000000022,
+          "mocapStrideM": 0.21623652146980477,
+          "imuStrideM": 1.0670782165555979,
+          "errM": 0.8508416950857931,
+          "errPct": 393.47733181353664,
+          "usable": false
+        },
+        {
+          "side": "R",
+          "mocapHsS": 6.93333333,
+          "imuHsS": 14.289954999999958,
+          "mocapStrideM": 0.043424944572306945,
+          "imuStrideM": 0.1,
+          "errM": 0.05657505542769306,
+          "errPct": 130.2823894996339,
+          "usable": false
+        }
+      ],
+      "strideAgreement": {
+        "nUsable": 0,
+        "nAll": 6,
+        "meanErrorM": null,
+        "maeM": null,
+        "rmseM": null,
+        "meanErrorPct": null,
+        "mocapMeanStrideM": null,
+        "imuMeanStrideM": null
+      },
+      "mocapSteps": [],
+      "mocapStepsHiddenReason": "bilateral.reliable=false (sameSideRepeats=1) — ซ่อนตาราง step",
+      "bilateralReliable": false,
+      "sameSideRepeats": 1,
+      "pelvisMaxExcursionM": 0.9299387077754073,
+      "pelvisNetMeaningful": false,
+      "mocapStepSummary": {
+        "n": 0,
+        "meanStepLengthM": null,
+        "meanStepTimeS": null
+      },
+      "stepTimePairs": []
+    }
+  }
+}

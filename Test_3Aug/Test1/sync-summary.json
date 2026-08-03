@@ -1,0 +1,140 @@
+{
+  "ok": true,
+  "note": "Sync exploratory: prefer signal |ω| envelope when available; HS-event is fallback. Not heel-tap lab gate",
+  "mocapFile": "Test_3Aug/Test1/mocap.gait-params.json",
+  "imuFile": "Test_3Aug/Test1/gait-trace-20260803-162019.json",
+  "lagS": 50.68484832092955,
+  "hsConsensusLagS": 53.41,
+  "lagSource": "signal-xcorr-envelope",
+  "lagTrusted": false,
+  "explorationOnly": true,
+  "consensus": {
+    "lagS": 53.41,
+    "ok": true,
+    "reason": "best-side-L",
+    "sidesUsed": [
+      "L"
+    ],
+    "spreadS": 3.1799999999999997
+  },
+  "perSide": {
+    "L": {
+      "lagS": 53.41,
+      "matchCount": 4,
+      "ok": true,
+      "signalLagS": 50.68993029969589,
+      "signalLagSource": "signal-xcorr-envelope"
+    },
+    "R": {
+      "lagS": 50.23,
+      "matchCount": 2,
+      "ok": true,
+      "signalLagS": 50.67976634216321,
+      "signalLagSource": "signal-xcorr-envelope"
+    }
+  },
+  "pairedCycles": {
+    "L": [
+      {
+        "mocapHsS": 7.025,
+        "imuHsS": 57.46,
+        "alignedImuHsS": 6.775151679070454,
+        "dtS": -0.24984832092954612,
+        "mocapStrideM": 0.8844124669449536,
+        "imuStrideM": 0.22729006320854558,
+        "mocapStrideTimeS": 1.8249999999999993,
+        "imuStrideTimeS": 1.42,
+        "imuUntrusted": false
+      }
+    ],
+    "R": []
+  },
+  "pairedCyclesPerSideLag": {
+    "L": [
+      {
+        "mocapHsS": 2.24166667,
+        "imuHsS": 55.740005000000004,
+        "alignedImuHsS": 2.330005000000007,
+        "dtS": 0.08833833000000713,
+        "mocapStrideM": 0.49470771509189515,
+        "imuStrideM": 1.1572033521774348,
+        "mocapStrideTimeS": 1.80833333,
+        "imuStrideTimeS": 1.7199949999999953,
+        "imuUntrusted": false
+      },
+      {
+        "mocapHsS": 4.05,
+        "imuHsS": 57.46,
+        "alignedImuHsS": 4.050000000000004,
+        "dtS": 4.440892098500626e-15,
+        "mocapStrideM": 0.1113157459353814,
+        "imuStrideM": 0.22729006320854558,
+        "mocapStrideTimeS": 1.5916666700000004,
+        "imuStrideTimeS": 1.42,
+        "imuUntrusted": false
+      },
+      {
+        "mocapHsS": 5.64166667,
+        "imuHsS": 58.88,
+        "alignedImuHsS": 5.470000000000006,
+        "dtS": -0.17166666999999425,
+        "mocapStrideM": 0.21738478395075855,
+        "imuStrideM": 0.5110255570395658,
+        "mocapStrideTimeS": 1.3833333300000001,
+        "imuStrideTimeS": 1.0300050000000045,
+        "imuUntrusted": false
+      },
+      {
+        "mocapHsS": 7.025,
+        "imuHsS": 60.47,
+        "alignedImuHsS": 7.060000000000002,
+        "dtS": 0.03500000000000192,
+        "mocapStrideM": 0.8844124669449536,
+        "imuStrideM": null,
+        "mocapStrideTimeS": 1.8249999999999993,
+        "imuStrideTimeS": null,
+        "imuUntrusted": true
+      }
+    ],
+    "R": [
+      {
+        "mocapHsS": 1.31666667,
+        "imuHsS": 51.440122,
+        "alignedImuHsS": 1.2101220000000055,
+        "dtS": -0.10654466999999457,
+        "mocapStrideM": 0.9037589668887167,
+        "imuStrideM": 0.1,
+        "mocapStrideTimeS": 1.90833333,
+        "imuStrideTimeS": 1.6999290000000027,
+        "imuUntrusted": true
+      },
+      {
+        "mocapHsS": 6.24166667,
+        "imuHsS": 56.47004800000001,
+        "alignedImuHsS": 6.240048000000016,
+        "dtS": -0.001618669999984057,
+        "mocapStrideM": 0.5023700621766034,
+        "imuStrideM": 1.8,
+        "mocapStrideTimeS": 1.7583333300000001,
+        "imuStrideTimeS": 1.60048999999999,
+        "imuUntrusted": true
+      }
+    ]
+  },
+  "compareValidationPublishable": false,
+  "compareExplorationOnly": true,
+  "compareWarnings": [
+    "⛔ validationPublishable=false — ไม่มีข้างใดผ่าน agreement ที่ trusted (ดู sides[L|R].validationPublishable และ labChecklist); ใช้ --lab เพื่อบังคับ fail",
+    "🔭 explorationOnly=true — lag จาก HS-event circular / untrusted; validationPublishable ถูกบังคับเป็น false (ไม่ใช่ lab gate)",
+    "MoCap sameSideRepeats=3 — bilateral.reliable=false; ห้ามใช้ meanStepTime / trueCadence",
+    "ขา L: angleSource=heel-for-envelope-only — sync จาก |ω| ได้แต่ peak shank angle = null; trial ถัดไปติด lateral malleolus เป็น AnkleForAngle",
+    "ขา L: ตัด 1/1 คู่ ออกจาก agreement (clamp / ZUPT deviation / stance fallback) — เหลือใช้ได้ 0 คู่",
+    "ขา L: จับคู่ได้แต่ sync ไม่ trusted (ไม่มี --lag / signal-ok / onset coarse) — comparable=false จนกว่าจะมี heel-tap หรือ onset",
+    "ขา L: IMU มี 5 cycle ที่ stancePct=null (temporal unresolved)",
+    "ขา R: IMU มี 3/3 cycle ที่ stride ถูก clamp",
+    "ขา R: angleSource=heel-for-envelope-only — sync จาก |ω| ได้แต่ peak shank angle = null; trial ถัดไปติด lateral malleolus เป็น AnkleForAngle",
+    "ขา R: จับคู่ตามเวลาไม่ได้ — แสดงค่าเฉลี่ย session แบบ informational เท่านั้น (comparable=false; ห้ามใส่เปเปอร์)",
+    "ขา R: IMU มี 4 cycle ที่ stancePct=null (temporal unresolved)",
+    "vsMocapPelvisNetPct ถูกปิด — forwardAxis.method=max-excursion (net ไม่มีความหมายบนเดินไป-กลับ; maxExcursion=1.38m)"
+  ]
+}

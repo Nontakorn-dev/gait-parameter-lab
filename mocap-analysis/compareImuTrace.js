@@ -11,6 +11,8 @@
 import { GaitProcessor } from '../src/gait/gaitProcessor.js';
 import { applyAxisMap } from '../src/gateway/realtimeSensorUtils.js';
 import { minFinite, maxFinite } from '../src/util/finiteStats.js';
+import { GAIT_ANALYZE_EVERY_SAMPLES } from '../src/gait/gaitRuntimeConfig.js';
+import { computeCycleTimeCoverage, parseCycleKeyStartId } from '../src/gait/cycleCoverage.js';
 
 const COMPARE_KEYS = [
   { key: 'strideLengthM', unit: 'm', agreementClass: 'primary' },
@@ -124,6 +126,8 @@ function cycleEntryFromParams(params, side, sensorKey) {
     strideLengthM: params.strideLength,
     strideLengthClamped: params.strideLengthClamped ?? false,
     strideLengthUntrusted: params.strideLengthUntrusted ?? false,
+    suspectedMissedHs: Boolean(params.suspectedMissedHs),
+    isOpenStride: Boolean(params.isOpenStride),
     strideLengthSignedM: params.strideLengthSignedM ?? null,
     cadenceSpm: params.cadence,
     walkingSpeedMps: params.walkingSpeed,
@@ -136,10 +140,47 @@ function cycleEntryFromParams(params, side, sensorKey) {
     zuptAccelDeviationG: params.zuptAccelDeviationG ?? null,
     zuptCheck: params.zuptCheck ?? null,
     cycleStartTimestampMs: params.cycleStartTimestampMs,
-    // relative วินาทีนับจากต้น session ของ processor (= ต้น trace เมื่อ t_ms เป็น relative)
+    cycleEndTimestampMs: params.cycleEndTimestampMs ?? null,
     cycleStartTimeS: Number.isFinite(params.cycleStartTimestampMs)
       ? params.cycleStartTimestampMs / 1000
       : null,
+  };
+}
+
+function cycleEntryFromDiagnostic(d, side, sensorKey, firstT) {
+  let cycleStartTimeS = null;
+  if (Number.isFinite(d.cycleStartTimestampMs)) {
+    if (Number.isFinite(firstT) && firstT >= 946684800000) {
+      cycleStartTimeS = (d.cycleStartTimestampMs - firstT) / 1000;
+    } else {
+      cycleStartTimeS = d.cycleStartTimestampMs / 1000;
+    }
+  }
+  return {
+    cycleKey: String(d.cycleKey),
+    side,
+    sensorKey,
+    strideLengthM: d.strideLengthM ?? null,
+    strideLengthClamped: d.strideLengthClamped ?? false,
+    strideLengthUntrusted: d.strideLengthUntrusted ?? false,
+    suspectedMissedHs: Boolean(d.suspectedMissedHs),
+    isOpenStride: Boolean(d.isOpenStride),
+    strideLengthSignedM: null,
+    cadenceSpm: d.cadenceSpm ?? null,
+    walkingSpeedMps: d.walkingSpeedMps ?? null,
+    stancePct: d.stancePct ?? null,
+    swingPct: d.swingPct ?? null,
+    strideTimeS: d.strideTimeS ?? null,
+    peakShankAngleDeg: d.peakShankAngleDeg ?? null,
+    clearanceM: d.clearanceM ?? null,
+    temporalSource: d.temporalSource ?? null,
+    zuptAccelDeviationG: d.zuptCheck?.zuptAccelDeviationG ?? null,
+    zuptCheck: d.zuptCheck ?? null,
+    cycleStartTimestampMs: d.cycleStartTimestampMs ?? null,
+    cycleEndTimestampMs: d.cycleEndTimestampMs ?? null,
+    cycleStartSampleId: d.cycleStartSampleId ?? null,
+    cycleEndSampleId: d.cycleEndSampleId ?? null,
+    cycleStartTimeS,
   };
 }
 
@@ -150,14 +191,17 @@ function shouldUpgradeCycle(existing, next) {
   // อัปเกรดคุณภาพ temporal / ZUPT metadata
   if (existing.temporalSource !== 'measured-to' && next.temporalSource === 'measured-to') return true;
   if (!existing.zuptCheck?.vEndPreDrift && next.zuptCheck?.vEndPreDrift != null) return true;
+  if (existing.isOpenStride && next.isOpenStride === false) return true;
   return false;
 }
 
-/** ก้าวที่เอาเข้า agreement stats ได้ — ตัด clamp / ZUPT พัง / stance หลอก / v_end สูง */
+/** ก้าวที่เอาเข้า agreement stats ได้ — ตัด clamp / ZUPT พัง / stance หลอก / open / v_end สูง / missed-HS */
 export function isAgreementQualityImuCycle(cycle, options = {}) {
   if (!cycle) return false;
+  if (cycle.isOpenStride) return false;
   if (cycle.strideLengthClamped) return false;
   if (cycle.strideLengthUntrusted) return false;
+  if (cycle.suspectedMissedHs) return false;
   if (!Number.isFinite(cycle.strideLengthM)) return false;
   const temporal = cycle.temporalSource;
   if (temporal === 'previous-valid-ratio' || temporal === 'unresolved') return false;
@@ -173,10 +217,68 @@ export function isAgreementQualityImuCycle(cycle, options = {}) {
 }
 
 /**
+ * ตัด cycle ที่ช่วงเวลาทับซ้อนกัน — เก็บอันที่สั้นกว่า (แยก double-stride ที่พลาด HS)
+ * ใช้หลัง streaming reprocess เผื่อ diagnostic เก่าถูก emit ก่อน overlap guard แทนที่
+ */
+export function resolveOverlappingImuCycles(entries) {
+  if (!Array.isArray(entries) || entries.length < 2) return entries || [];
+  const indexed = entries.map((e, i) => {
+    const t0 = Number.isFinite(e.cycleStartTimeS) ? e.cycleStartTimeS : null;
+    let t1 = null;
+    if (Number.isFinite(e.cycleEndTimestampMs) && Number.isFinite(e.cycleStartTimestampMs)) {
+      const dt = (e.cycleEndTimestampMs - e.cycleStartTimestampMs) / 1000;
+      if (dt > 0) t1 = (Number.isFinite(t0) ? t0 : 0) + dt;
+    }
+    if (!Number.isFinite(t1) && Number.isFinite(t0) && Number.isFinite(e.strideTimeS) && e.strideTimeS > 0) {
+      t1 = t0 + e.strideTimeS;
+    }
+    return { e, i, t0, t1, open: Boolean(e.isOpenStride) };
+  });
+  const drop = new Set();
+  for (let a = 0; a < indexed.length; a += 1) {
+    if (drop.has(a) || indexed[a].open) continue;
+    if (!Number.isFinite(indexed[a].t0) || !Number.isFinite(indexed[a].t1)) continue;
+    for (let b = a + 1; b < indexed.length; b += 1) {
+      if (drop.has(b) || indexed[b].open) continue;
+      if (!Number.isFinite(indexed[b].t0) || !Number.isFinite(indexed[b].t1)) continue;
+      const A = indexed[a];
+      const B = indexed[b];
+      if (!(A.t0 < B.t1 && B.t0 < A.t1)) continue;
+      const aLen = A.t1 - A.t0;
+      const bLen = B.t1 - B.t0;
+      // เก็บอันสั้นกว่า; ถ้ายาวเท่ากันเก็บอันที่เริ่มก่อน
+      if (aLen > bLen + 1e-6) drop.add(a);
+      else if (bLen > aLen + 1e-6) drop.add(b);
+      else if (A.t0 <= B.t0) drop.add(b);
+      else drop.add(a);
+    }
+  }
+  return entries.filter((_, i) => !drop.has(i));
+}
+
+function isCleanStrideForDistance(cycle) {
+  if (!cycle || cycle.isOpenStride) return false;
+  if (!Number.isFinite(cycle.strideLengthM)) return false;
+  if (cycle.strideLengthClamped || cycle.strideLengthUntrusted || cycle.suspectedMissedHs) return false;
+  return true;
+}
+
+/**
  * Reprocess IMU trace samples → รายการ cycle ต่อข้าง พร้อม metrics เต็ม
+ *
+ * Default = mirror live device: sliding buffer 12s + analyze ทุก N sample
+ * (full-session buffer ทำให้ adaptive HS threshold ไม่ translation-invariant กับเครื่องจริง)
+ * ส่ง fullSessionBuffer:true เฉพาะเมื่อต้องการโหมด offline ทดลอง
  */
 export function reprocessImuTrace(trace, options = {}) {
-  const analyzeEvery = options.analyzeEvery ?? 40;
+  const fullSessionBuffer = options.fullSessionBuffer === true;
+  // default: mirror live (sliding 12s + analyze เป็นระยะ) — ตรงกับเครื่องจริง
+  const useStreaming = fullSessionBuffer
+    ? (options.forceStreaming === true || options.streamingSimulate === true)
+    : options.streamingSimulate !== false;
+  const analyzeEvery = Number.isFinite(options.analyzeEvery)
+    ? options.analyzeEvery
+    : GAIT_ANALYZE_EVERY_SAMPLES;
   const preferSensorFrame = options.preferSensorFrame ?? Boolean(trace.hasSensorFrameRaw);
   const axisMap = options.axisMap || trace.axisMap || undefined;
   const calibrationBySensor = options.calibrationBySensor || trace.calibrationBySensor || {};
@@ -204,6 +306,10 @@ export function reprocessImuTrace(trace, options = {}) {
 
   for (const [sensorKey, sensorSamples] of bySensor) {
     const proc = new GaitProcessor({ orientationFilter });
+    // mirror live: เก็บ maxBuffer = 12s; ขยายเฉพาะเมื่อขอ fullSessionBuffer
+    if (fullSessionBuffer) {
+      proc.maxBuffer = Math.max(sensorSamples.length + 64, proc.maxBuffer);
+    }
     const profile = calibrationBySensor[sensorKey];
     if (profile) {
       proc.applyCalibration(profile);
@@ -212,54 +318,111 @@ export function reprocessImuTrace(trace, options = {}) {
     const seen = new Map(); // cycleKey → entry object (mutable สำหรับ upgrade)
     let sinceAnalyze = 0;
     const sideHint = sensorSamples.find((s) => s.side === 'L' || s.side === 'R')?.side || null;
-
-    // t0 ของเซนเซอร์นี้ = sample แรกที่ valid (สำหรับ normalize เวลาถ้าเป็น absolute epoch)
     const firstT = sensorSamples.map((s) => s.timestampMs).find(Number.isFinite);
 
+    const ensureSide = (hintSide) => {
+      const side = hintSide === 'L' || hintSide === 'R' ? hintSide : sideHint;
+      return side === 'L' || side === 'R' ? side : null;
+    };
+
+    const removeEntry = (key) => {
+      const existing = seen.get(String(key));
+      if (!existing) return;
+      seen.delete(String(key));
+      const side = existing.side;
+      if (side === 'L' || side === 'R') {
+        const idx = bySide[side].indexOf(existing);
+        if (idx >= 0) bySide[side].splice(idx, 1);
+      }
+    };
+
+    const upsertEntry = (entry) => {
+      if (!entry?.cycleKey) return;
+      const side = ensureSide(entry.side);
+      if (!side) return;
+      entry.side = side;
+      const existing = seen.get(String(entry.cycleKey));
+      if (!existing) {
+        seen.set(String(entry.cycleKey), entry);
+        bySide[side].push(entry);
+      } else if (shouldUpgradeCycle(existing, entry)) {
+        Object.assign(existing, entry);
+      }
+      // closed แทน open คนละ key (open:id vs id) — ลบ open คู่กัน
+      if (!entry.isOpenStride) {
+        const startId = entry.cycleStartSampleId ?? parseCycleKeyStartId(entry.cycleKey);
+        if (Number.isFinite(startId)) removeEntry(`open:${startId}`);
+      }
+    };
+
+    const mergeDiagnostic = (d) => {
+      if (d?.retracted) {
+        removeEntry(d.cycleKey);
+        return;
+      }
+      const key = String(d.cycleKey);
+      let existing = seen.get(key);
+      if (!existing) {
+        const side = ensureSide(d.side);
+        if (!side) return;
+        existing = cycleEntryFromDiagnostic(d, side, sensorKey, firstT);
+        seen.set(key, existing);
+        bySide[side].push(existing);
+      }
+      if (d.strideLengthClamped != null) existing.strideLengthClamped = d.strideLengthClamped;
+      if (d.strideLengthUntrusted != null) existing.strideLengthUntrusted = d.strideLengthUntrusted;
+      if (d.suspectedMissedHs != null) existing.suspectedMissedHs = Boolean(d.suspectedMissedHs);
+      if (d.isOpenStride != null) existing.isOpenStride = Boolean(d.isOpenStride);
+      if (d.strideLengthM !== undefined) existing.strideLengthM = d.strideLengthM;
+      if (d.strideTimeS !== undefined) existing.strideTimeS = d.strideTimeS;
+      if (d.cadenceSpm !== undefined) existing.cadenceSpm = d.cadenceSpm;
+      if (d.walkingSpeedMps !== undefined) existing.walkingSpeedMps = d.walkingSpeedMps;
+      if (d.stancePct !== undefined) existing.stancePct = d.stancePct;
+      if (d.swingPct !== undefined) existing.swingPct = d.swingPct;
+      if (d.temporalSource != null) existing.temporalSource = d.temporalSource;
+      if (d.peakShankAngleDeg !== undefined) existing.peakShankAngleDeg = d.peakShankAngleDeg;
+      if (d.clearanceM !== undefined) existing.clearanceM = d.clearanceM;
+      if (d.cycleEndTimestampMs != null) existing.cycleEndTimestampMs = d.cycleEndTimestampMs;
+      if (d.cycleStartSampleId != null) existing.cycleStartSampleId = d.cycleStartSampleId;
+      if (d.cycleEndSampleId != null) existing.cycleEndSampleId = d.cycleEndSampleId;
+      if (d.zuptCheck) {
+        existing.zuptCheck = d.zuptCheck;
+        existing.zuptAccelDeviationG = d.zuptCheck.zuptAccelDeviationG ?? existing.zuptAccelDeviationG;
+      }
+      if (!existing.isOpenStride) {
+        const startId = existing.cycleStartSampleId ?? parseCycleKeyStartId(existing.cycleKey);
+        if (Number.isFinite(startId)) removeEntry(`open:${startId}`);
+      }
+    };
+
     proc.onParams(({ params, newCycleDiagnostics }) => {
-      if (newCycleDiagnostics?.length) {
-        for (const d of newCycleDiagnostics) {
-          const existing = seen.get(String(d.cycleKey));
-          if (!existing) continue;
-          if (d.strideLengthClamped != null) existing.strideLengthClamped = d.strideLengthClamped;
-          if (d.strideLengthUntrusted != null) existing.strideLengthUntrusted = d.strideLengthUntrusted;
-          if (d.strideLengthM !== undefined) existing.strideLengthM = d.strideLengthM;
-          if (d.zuptCheck) {
-            existing.zuptCheck = d.zuptCheck;
-            existing.zuptAccelDeviationG = d.zuptCheck.zuptAccelDeviationG ?? existing.zuptAccelDeviationG;
+      // สร้าง/อัปเกรดจาก params ก่อน แล้วค่อย merge diagnostic (กัน diagnostic ตกหล่น)
+      if (params?.cycleKey) {
+        const side = ensureSide(params.side);
+        if (side) {
+          const entry = cycleEntryFromParams(params, side, sensorKey);
+          if (
+            Number.isFinite(entry.cycleStartTimestampMs)
+            && Number.isFinite(firstT)
+            && firstT >= 946684800000
+          ) {
+            entry.cycleStartTimeS = (entry.cycleStartTimestampMs - firstT) / 1000;
           }
+          upsertEntry(entry);
         }
       }
 
-      if (!params?.cycleKey) return;
-      const side = params.side === 'L' || params.side === 'R' ? params.side : sideHint;
-      if (side !== 'L' && side !== 'R') return;
-
-      const entry = cycleEntryFromParams(params, side, sensorKey);
-      // ถ้า timestamp เป็น epoch absolute ให้แปลงเป็น relative ต่อ first sample ของ trace
-      if (
-        Number.isFinite(entry.cycleStartTimestampMs)
-        && Number.isFinite(firstT)
-        && firstT >= 946684800000
-      ) {
-        entry.cycleStartTimeS = (entry.cycleStartTimestampMs - firstT) / 1000;
-      }
-
-      const existing = seen.get(params.cycleKey);
-      if (!existing) {
-        seen.set(params.cycleKey, entry);
-        bySide[side].push(entry);
-        return;
-      }
-      if (shouldUpgradeCycle(existing, entry)) {
-        Object.assign(existing, entry);
+      if (newCycleDiagnostics?.length) {
+        for (const d of newCycleDiagnostics) {
+          mergeDiagnostic(d);
+        }
       }
     });
 
     for (const sample of sensorSamples) {
       proc.addSample(sample);
       sinceAnalyze += 1;
-      if (sinceAnalyze >= analyzeEvery) {
+      if (useStreaming && sinceAnalyze >= analyzeEvery) {
         proc.analyze();
         sinceAnalyze = 0;
       }
@@ -277,10 +440,18 @@ export function reprocessImuTrace(trace, options = {}) {
   }
 
   for (const side of ['L', 'R']) {
+    bySide[side] = resolveOverlappingImuCycles(bySide[side]);
     bySide[side].sort((a, b) => (a.cycleStartTimeS ?? 0) - (b.cycleStartTimeS ?? 0));
   }
 
-  return { ok: true, reason: null, bySide, source: 'reprocess', qualityFlags };
+  return {
+    ok: true,
+    reason: null,
+    bySide,
+    source: 'reprocess',
+    qualityFlags,
+    reprocessMode: fullSessionBuffer ? 'full-session-buffer' : 'mirror-live',
+  };
 }
 
 /** fallback: ใช้ cycles[] ใน trace (มีแค่ strideLength เป็นหลัก) */
@@ -321,15 +492,22 @@ export function extractImuCyclesFromTrace(trace) {
 }
 
 export function summarizeImuSide(cycles) {
+  const list = cycles || [];
+  const closed = list.filter((c) => !c.isOpenStride);
+  const coverage = computeCycleTimeCoverage(closed);
   return {
-    cycleCount: cycles.length,
-    meanStrideLengthM: mean(cycles.map((c) => c.strideLengthM)),
-    meanCadenceSpm: mean(cycles.map((c) => c.cadenceSpm)),
-    meanWalkingSpeedMps: mean(cycles.map((c) => c.walkingSpeedMps)),
-    meanStancePct: mean(cycles.map((c) => c.stancePct)),
-    meanPeakShankAngleDeg: mean(cycles.map((c) => c.peakShankAngleDeg)),
-    meanClearanceM: mean(cycles.map((c) => c.clearanceM)),
-    clampedCount: cycles.filter((c) => c.strideLengthClamped).length,
+    cycleCount: closed.length,
+    openStrideCount: list.length - closed.length,
+    meanStrideLengthM: mean(closed.map((c) => c.strideLengthM)),
+    meanCadenceSpm: mean(closed.map((c) => c.cadenceSpm)),
+    meanWalkingSpeedMps: mean(closed.map((c) => c.walkingSpeedMps)),
+    meanStancePct: mean(closed.map((c) => c.stancePct)),
+    meanPeakShankAngleDeg: mean(closed.map((c) => c.peakShankAngleDeg)),
+    meanClearanceM: mean(closed.map((c) => c.clearanceM)),
+    clampedCount: closed.filter((c) => c.strideLengthClamped).length,
+    coverageGapS: coverage.coverageGapS,
+    coverageRatio: coverage.coverageRatio,
+    hasCoverageGap: coverage.hasCoverageGap,
   };
 }
 
@@ -341,18 +519,25 @@ function imuCycleTimeS(cycle) {
   return Number.isFinite(cycle.cycleStartTimeS) ? cycle.cycleStartTimeS : null;
 }
 
+/** นับคู่ HS แบบ greedy nearest ใน tolerance — ต้องตรงกับ pairCyclesByTime */
 function countHsMatches(mocapTimes, imuTimes, lag, matchToleranceS) {
   let count = 0;
   let residualAbsSum = 0;
-  let mi = 0;
+  const usedImu = new Set();
   for (const mt of mocapTimes) {
-    while (mi < imuTimes.length && imuTimes[mi] - lag < mt - matchToleranceS) mi += 1;
-    if (mi < imuTimes.length && Math.abs((imuTimes[mi] - lag) - mt) <= matchToleranceS) {
-      const err = (imuTimes[mi] - lag) - mt;
-      residualAbsSum += Math.abs(err);
-      count += 1;
-      mi += 1;
+    let best = null;
+    for (let i = 0; i < imuTimes.length; i += 1) {
+      if (usedImu.has(i)) continue;
+      const err = (imuTimes[i] - lag) - mt;
+      const abs = Math.abs(err);
+      if (abs <= matchToleranceS && (!best || abs < best.abs)) {
+        best = { i, abs };
+      }
     }
+    if (!best) continue;
+    usedImu.add(best.i);
+    count += 1;
+    residualAbsSum += best.abs;
   }
   return { count, residualAbsSum };
 }
@@ -398,10 +583,12 @@ export function estimateHsTimeLagS(mocapCycles, imuCycles, options = {}) {
   }
 
   // สแกนกว้าง — ห้าม filter ด้วย fine window ตอนสร้าง candidate (นั่นคือบั๊ก alias เดิม)
+  // step เฉพาะ loop i (~12 จุด IMU); j เดินทุก MoCap HS — ถ้า step ทั้งคู่
+  // แล้ว c ไม่หารด้วย step ลงตัว → lag จริงไม่เคยเป็น candidate (เช่น 8.0 กับ step=2)
   const candidates = new Set();
   const step = Math.max(1, Math.floor(imuTimes.length / 12));
   for (let i = 0; i < imuTimes.length; i += step) {
-    for (let j = 0; j < mocapTimes.length; j += step) {
+    for (let j = 0; j < mocapTimes.length; j += 1) {
       const lag = imuTimes[i] - mocapTimes[j];
       if (Math.abs(lag) <= rivalScanMaxLagS) {
         candidates.add(Math.round(lag * 100) / 100);
@@ -467,6 +654,8 @@ export function estimateHsTimeLagS(mocapCycles, imuCycles, options = {}) {
     }))
     .sort((a, b) => b.matchCount - a.matchCount);
   const periodAliasRisk = rivalLags.length > 0;
+  // ไม่มี trusted coarse → ห้าม ok (กัน alias ใกล้ 0)
+  // มี trusted coarse → อนุญาตจับคู่ exploratory แต่ usePairedAgreement ตัด periodAliasRisk
   const refuseForAlias = periodAliasRisk && !trustedCoarse;
   const ok = bestCount > 0 && !refuseForAlias;
   let reason = null;
@@ -577,10 +766,13 @@ export function estimateSignalOnsetS(t, y, options = {}) {
 
 function listLocalMaxima(corrByLag, minCorr) {
   const peaks = [];
-  for (const [lagSamples, corr] of corrByLag) {
+  const lags = [...corrByLag.keys()].sort((a, b) => a - b);
+  for (let i = 0; i < lags.length; i += 1) {
+    const lagSamples = lags[i];
+    const corr = corrByLag.get(lagSamples);
     if (!(corr >= minCorr)) continue;
-    const left = corrByLag.get(lagSamples - 1);
-    const right = corrByLag.get(lagSamples + 1);
+    const left = i > 0 ? corrByLag.get(lags[i - 1]) : null;
+    const right = i + 1 < lags.length ? corrByLag.get(lags[i + 1]) : null;
     const isLocalMax = (left == null || corr >= left) && (right == null || corr >= right);
     if (isLocalMax) peaks.push({ lagSamples, corr });
   }
@@ -592,7 +784,8 @@ function listLocalMaxima(corrByLag, minCorr) {
  *
  * Coarse→fine:
  *   1) coarseLag จาก onset |ω| (หรือ options.coarseLagS / options.lagS)
- *   2) สแกนกว้าง (±rivalScanMaxLagS) เพื่อหา peaks + rival ที่ ±n·stride
+ *   2) สแกนกว้าง (±rivalScanMaxLagS) บนหน้าต่างทับซ้อนที่เลื่อนตาม lag
+ *      (ไม่จำกัด ±overlap/3 — ไม่งั้น --rival-scan 90 ไม่มีผลเมื่อ MoCap สั้น)
  *   3) เลือก peak ใกล้ coarseLag ที่สุด (ใน fine window เป็นพิเศษ)
  *   4) ถ้ามี rival corr ≥ 95% ของ peak ที่เลือก → periodAliasRisk / ambiguous (ต้องเตือน — ห้ามเงียบ)
  *
@@ -606,6 +799,7 @@ export function estimateSignalLagS(mocapT, mocapY, imuT, imuY, options = {}) {
   const dt = options.dtS ?? DEFAULT_XCORR_DT_S;
   const minPeakCorr = options.minPeakCorr ?? DEFAULT_MIN_PEAK_CORR;
   const polarityMargin = options.polarityPeakMargin ?? POLARITY_PEAK_MARGIN;
+  const useEnvelope = options.useEnvelope === true;
 
   const empty = {
     lagS: null,
@@ -619,6 +813,7 @@ export function estimateSignalLagS(mocapT, mocapY, imuT, imuY, options = {}) {
     rivalPeaks: [],
     coarseLagS: null,
     coarseFromOnset: false,
+    useEnvelope,
     reason: 'missing-series',
     systematicUncertaintyS: SIGNAL_LAG_SYSTEMATIC_UNCERTAINTY_S,
   };
@@ -626,6 +821,14 @@ export function estimateSignalLagS(mocapT, mocapY, imuT, imuY, options = {}) {
   if (!mocapT?.length || !imuT?.length || mocapT.length !== mocapY.length || imuT.length !== imuY.length) {
     return empty;
   }
+
+  // |ω| envelope — ขั้ว/นิยามมุมไม่ตรงกันแต่จังหวะก้าวตรง (เช่น heel แทน malleolus)
+  const mocapYUse = useEnvelope
+    ? mocapY.map((v) => (Number.isFinite(v) ? Math.abs(v) : v))
+    : mocapY;
+  const imuYUse = useEnvelope
+    ? imuY.map((v) => (Number.isFinite(v) ? Math.abs(v) : v))
+    : imuY;
 
   const mocapT0 = minFinite(mocapT);
   const imuT0 = minFinite(imuT);
@@ -635,34 +838,23 @@ export function estimateSignalLagS(mocapT, mocapY, imuT, imuY, options = {}) {
     return empty;
   }
 
-  const t0 = Math.max(mocapT0, imuT0);
-  const t1 = Math.min(mocapT1, imuT1);
-  if (!(t1 - t0 >= 1.0)) {
-    return { ...empty, reason: 'overlap-too-short' };
-  }
-
-  const ref = resampleUniform(mocapT, mocapY, dt, t0, t1);
-  const sig = resampleUniform(imuT, imuY, dt, t0, t1);
-  const maxScanSamples = Math.min(
-    Math.floor(rivalScanMaxLagS / dt),
-    Math.max(1, Math.floor(ref.length / 3)),
-  );
-  if (maxScanSamples < 1 || ref.length < 20) {
-    return { ...empty, reason: 'too-few-samples' };
-  }
-
-  function nccAtLag(lagSamples) {
+  /** NCC ที่ lag คงที่ — resample IMU บน [t0+lag, t1+lag] ให้เทียบกับ MoCap [t0,t1] ได้แม้ lag >> overlap เดิม */
+  function nccAtLagS(lagS) {
+    const o0 = Math.max(mocapT0, imuT0 - lagS);
+    const o1 = Math.min(mocapT1, imuT1 - lagS);
+    if (!(o1 - o0 >= 1.0)) return null;
+    const ref = resampleUniform(mocapT, mocapYUse, dt, o0, o1);
+    const sig = resampleUniform(imuT, imuYUse, dt, o0 + lagS, o1 + lagS);
     let sumR = 0;
     let sumS = 0;
     let sumRR = 0;
     let sumSS = 0;
     let sumRS = 0;
     let n = 0;
-    for (let i = 0; i < ref.length; i += 1) {
-      const j = i + lagSamples;
-      if (j < 0 || j >= sig.length) continue;
+    const nSamples = Math.min(ref.length, sig.length);
+    for (let i = 0; i < nSamples; i += 1) {
       const r = ref[i];
-      const s = sig[j];
+      const s = sig[i];
       if (!Number.isFinite(r) || !Number.isFinite(s)) continue;
       sumR += r;
       sumS += s;
@@ -678,72 +870,110 @@ export function estimateSignalLagS(mocapT, mocapY, imuT, imuY, options = {}) {
     return num / den;
   }
 
-  // Forced lag (จาก --lag / heel-tap sync)
+  const maxScanSamples = Math.max(1, Math.floor(rivalScanMaxLagS / dt));
+
+  // Forced lag (จาก --lag / heel-tap sync) — ตรวจ corr บนหน้าต่างเลื่อน ไม่ใช่ overlap ดิบ
   if (Number.isFinite(options.lagS)) {
-    const lagSamples = Math.round(options.lagS / dt);
-    const corr = nccAtLag(lagSamples);
+    const corr = nccAtLagS(options.lagS);
+    const ok = Number.isFinite(corr) && corr >= minPeakCorr;
+    let reason = null;
+    if (!Number.isFinite(corr)) reason = 'overlap-too-short-at-lag';
+    else if (!ok) reason = 'weak-correlation';
     return {
       lagS: options.lagS,
       peakCorr: corr,
       peakCorrMinus: corr == null ? null : -corr,
       polarity: 1,
-      ok: Number.isFinite(corr) && corr >= minPeakCorr,
+      ok,
       ambiguous: false,
       polarityIndeterminate: false,
       periodAliasRisk: false,
       rivalPeaks: [],
       coarseLagS: options.lagS,
       coarseFromOnset: false,
-      reason: Number.isFinite(corr) && corr >= minPeakCorr ? null : 'weak-correlation',
+      useEnvelope,
+      reason,
       systematicUncertaintyS: SIGNAL_LAG_SYSTEMATIC_UNCERTAINTY_S,
     };
   }
 
+  // ขั้นตัวอย่างสแกน: ละเอียดใกล้ 0 / ใกล้ coarse; กว้างขึ้นนอกนั้น (กัน O(rivalScan/dt) ช้าเกิน)
+  const fineStep = 1;
+  const coarseStep = Math.max(1, Math.round(0.05 / dt)); // ~50 ms
   const corrByLag = new Map();
   let minCorr = Infinity;
-  for (let lagSamples = -maxScanSamples; lagSamples <= maxScanSamples; lagSamples += 1) {
-    const corr = nccAtLag(lagSamples);
-    if (corr == null) continue;
+  function recordLag(lagSamples) {
+    if (corrByLag.has(lagSamples)) return;
+    const corr = nccAtLagS(lagSamples * dt);
+    if (corr == null) return;
     corrByLag.set(lagSamples, corr);
     if (corr < minCorr) minCorr = corr;
+  }
+  // จะรู้ coarse หลัง onset — สแกนกว้างก่อน แล้ว densify รอบ coarse/peaks
+  for (let lagSamples = -maxScanSamples; lagSamples <= maxScanSamples; lagSamples += coarseStep) {
+    recordLag(lagSamples);
+  }
+  // densify ใน fine window รอบ 0 (กรณีไม่มี onset)
+  for (let lagSamples = -Math.floor(fineMaxLagS / dt); lagSamples <= Math.floor(fineMaxLagS / dt); lagSamples += fineStep) {
+    recordLag(lagSamples);
   }
 
   if (!corrByLag.size) {
     return { ...empty, reason: 'weak-correlation' };
   }
 
-  const peakCorrMinus = Number.isFinite(minCorr) ? -minCorr : null;
-  const peaks = listLocalMaxima(corrByLag, minPeakCorr * 0.5);
-  const strongPeaks = peaks.filter((p) => p.corr >= minPeakCorr);
-
   // coarse lag จาก onset (ไม่เป็นคาบ) — หรือ override ชัดเจน (ไม่นับเป็น onset)
   let coarseLagS = Number.isFinite(options.coarseLagS) ? options.coarseLagS : null;
   const hasExplicitCoarse = Number.isFinite(options.coarseLagS);
   let coarseFromOnset = false;
   if (!Number.isFinite(coarseLagS)) {
-    const mocapOnset = estimateSignalOnsetS(mocapT, mocapY, options);
-    const imuOnset = estimateSignalOnsetS(imuT, imuY, options);
+    const mocapOnset = estimateSignalOnsetS(mocapT, mocapYUse, options);
+    const imuOnset = estimateSignalOnsetS(imuT, imuYUse, options);
     if (Number.isFinite(mocapOnset) && Number.isFinite(imuOnset)) {
       coarseLagS = imuOnset - mocapOnset;
       coarseFromOnset = true;
     }
   }
   if (!Number.isFinite(coarseLagS)) coarseLagS = 0;
-  const trustedCoarse = hasExplicitCoarse || coarseFromOnset;
+  // |ω| envelope: onset จาก heel มักหลอก (เริ่มกลาง gait / stance ripple) — อย่านับเป็น trusted coarse
+  const trustedCoarse = hasExplicitCoarse || (coarseFromOnset && !useEnvelope);
 
   const fineSamples = Math.floor(fineMaxLagS / dt);
   const coarseSamples = Math.round(coarseLagS / dt);
 
-  // เลือก peak: ใกล้ coarse ที่สุด ในกลุ่มที่ corr สูงสุด (ยอมใน fine window ก่อน)
+  // densify รอบ coarse + รอบ peak หยาบที่เจอแล้ว
+  for (let lagSamples = coarseSamples - fineSamples; lagSamples <= coarseSamples + fineSamples; lagSamples += fineStep) {
+    if (Math.abs(lagSamples) <= maxScanSamples) recordLag(lagSamples);
+  }
+  for (const [lagSamples, corr] of [...corrByLag.entries()]) {
+    if (corr < minPeakCorr * 0.5) continue;
+    for (let d = -coarseStep; d <= coarseStep; d += fineStep) {
+      const ls = lagSamples + d;
+      if (Math.abs(ls) <= maxScanSamples) recordLag(ls);
+    }
+  }
+
+  const peakCorrMinus = Number.isFinite(minCorr) ? -minCorr : null;
+  const peaks = listLocalMaxima(corrByLag, minPeakCorr * 0.5);
+  const strongPeaks = peaks.filter((p) => p.corr >= minPeakCorr);
+
+  // เลือก peak: มี trusted coarse → ใกล้ coarse ในกลุ่ม corr สูงสุด; ไม่มี → corr สูงสุด (อย่าชอบ 0)
   function pickPeak(candidates) {
     if (!candidates.length) return null;
     const bestCorr = Math.max(...candidates.map((p) => p.corr));
     const top = candidates.filter((p) => p.corr >= bestCorr * AMBIGUOUS_PEAK_RATIO);
-    top.sort((a, b) => Math.abs(a.lagSamples - coarseSamples) - Math.abs(b.lagSamples - coarseSamples));
+    if (trustedCoarse) {
+      top.sort((a, b) => Math.abs(a.lagSamples - coarseSamples) - Math.abs(b.lagSamples - coarseSamples));
+    } else {
+      top.sort((a, b) => b.corr - a.corr || Math.abs(a.lagSamples) - Math.abs(b.lagSamples));
+    }
     return top[0];
   }
 
-  const inFine = strongPeaks.filter((p) => Math.abs(p.lagSamples - coarseSamples) <= fineSamples);
+  const inFine = trustedCoarse
+    ? strongPeaks.filter((p) => Math.abs(p.lagSamples - coarseSamples) <= fineSamples)
+    : [];
+  // ไม่มี trusted coarse → ห้ามชอบ peak ใกล้ 0 (เคยเลือก alias ใกล้ 0 ทั้งที่ |ω| peak จริงอยู่ที่ ~50s)
   let chosen = pickPeak(inFine.length ? inFine : strongPeaks);
   if (!chosen) {
     // ไม่มี peak แข็งพอ — ใช้ max ดิบ
@@ -761,16 +991,18 @@ export function estimateSignalLagS(mocapT, mocapY, imuT, imuY, options = {}) {
   const bestCorr = chosen.corr;
   const bestLagSamples = chosen.lagSamples;
 
-  const polarityIndeterminate = Number.isFinite(peakCorrMinus)
+  const polarityIndeterminate = !useEnvelope
+    && Number.isFinite(peakCorrMinus)
     && bestCorr >= minPeakCorr
     && Math.abs(peakCorrMinus - bestCorr) <= polarityMargin;
 
-  if (Number.isFinite(peakCorrMinus) && peakCorrMinus > bestCorr + polarityMargin) {
+  if (!useEnvelope && Number.isFinite(peakCorrMinus) && peakCorrMinus > bestCorr + polarityMargin) {
     return {
       ...empty,
       peakCorr: bestCorr,
       peakCorrMinus,
       coarseLagS,
+      useEnvelope,
       reason: 'polarity-mismatch',
     };
   }
@@ -784,6 +1016,7 @@ export function estimateSignalLagS(mocapT, mocapY, imuT, imuY, options = {}) {
       ok: false,
       ambiguous: true,
       polarityIndeterminate: true,
+      useEnvelope,
       reason: 'ambiguous-polarity',
     };
   }
@@ -823,13 +1056,16 @@ export function estimateSignalLagS(mocapT, mocapY, imuT, imuY, options = {}) {
 
   const lagS = (bestLagSamples + frac) * dt;
   const farFromCoarse = Math.abs(lagS - coarseLagS) > fineMaxLagS + 0.05;
+  // |ω| envelope โดยไม่มี onset: ยอม lag ไกลจาก 0 (trial เริ่มกลาง gait) — ยัง exploratory ไม่ใช่ lab gate
+  const envelopeOpenScan = useEnvelope && !trustedCoarse;
   // ถ้าไม่มี onset / explicit coarse / --lag แล้วยังมี rival ±n·stride → ห้ามเลือก alias ใกล้ 0 แบบเงียบ
-  const refuseForAlias = periodAliasRisk && !trustedCoarse;
-  const ok = !farFromCoarse && !refuseForAlias;
+  // (envelope open-scan ยอม periodAliasRisk flag ไว้ แต่ไม่ reject ทั้งก้อน — syncTrusted ตัดอยู่แล้ว)
+  const refuseForAlias = periodAliasRisk && !trustedCoarse && !envelopeOpenScan;
+  const ok = (envelopeOpenScan || !farFromCoarse) && !refuseForAlias;
   // reason = สาเหตุที่ปฏิเสธเท่านั้น; ข้อสังเกตอยู่ที่ periodAliasRisk / ambiguous
   let reason = null;
   if (!ok) {
-    if (farFromCoarse) reason = 'lag-far-from-coarse-onset';
+    if (!envelopeOpenScan && farFromCoarse) reason = 'lag-far-from-coarse-onset';
     else if (refuseForAlias) reason = 'period-alias-rivals';
     else if (ambiguous) reason = 'ambiguous-period-peaks';
   }
@@ -846,6 +1082,7 @@ export function estimateSignalLagS(mocapT, mocapY, imuT, imuY, options = {}) {
     rivalPeaks,
     coarseLagS,
     coarseFromOnset,
+    useEnvelope,
     reason,
     systematicUncertaintyS: SIGNAL_LAG_SYSTEMATIC_UNCERTAINTY_S,
   };
@@ -860,18 +1097,19 @@ export function extractImuGyroSeries(trace, side, options = {}) {
   const samples = Array.isArray(trace?.samples) ? trace.samples : [];
   const preferSensorFrame = options.preferSensorFrame ?? Boolean(trace?.hasSensorFrameRaw);
   const axisMap = options.axisMap || trace?.axisMap || undefined;
+  const axis = options.axis === 'gy' || options.axis === 'gz' ? options.axis : 'gx';
   const rawT = [];
-  const gx = [];
+  const values = [];
 
   for (const sample of samples) {
     const input = sampleToProcessorInput(sample, { axisMap, preferSensorFrame });
     if (!input || input.side !== side) continue;
-    if (!Number.isFinite(input.timestampMs) || !Number.isFinite(input.gx)) continue;
+    if (!Number.isFinite(input.timestampMs) || !Number.isFinite(input[axis])) continue;
     rawT.push(input.timestampMs);
-    gx.push(input.gx);
+    values.push(input[axis]);
   }
 
-  if (rawT.length < 20) return { tS: [], gx: [], ok: false };
+  if (rawT.length < 20) return { tS: [], gx: [], values: [], axis, ok: false };
 
   // unwrap micros wrap + relative ต่อ sample แรก
   const tS = [];
@@ -888,7 +1126,7 @@ export function extractImuGyroSeries(trace, side, options = {}) {
     last = valueMs;
   }
 
-  return { tS, gx, ok: true };
+  return { tS, gx: values, values, axis, ok: true };
 }
 
 /**
@@ -1072,7 +1310,9 @@ function alignmentMode(lagSource, usePairedAgreement, rawPaired) {
   if (!usePairedAgreement) {
     return rawPaired ? 'paired-untrusted' : 'session-mean-informational';
   }
-  if (lagSource === 'signal-xcorr') return 'signal-xcorr+hs-pair';
+  if (lagSource === 'signal-xcorr' || lagSource === 'signal-xcorr-envelope') {
+    return lagSource === 'signal-xcorr-envelope' ? 'signal-envelope+hs-pair' : 'signal-xcorr+hs-pair';
+  }
   if (lagSource === 'external' || lagSource === 'heel-tap' || lagSource === 'manual') {
     return 'external-lag';
   }
@@ -1087,7 +1327,12 @@ export function compareMocapToImu(mocap, imuTrace, options = {}) {
   const warnings = [];
 
   if (mocap?.bilateral?.sameSideRepeats > 0) {
-    warnings.push(`MoCap sameSideRepeats=${mocap.bilateral.sameSideRepeats} — event detection อาจพลาดฝั่งใดฝั่งหนึ่ง`);
+    warnings.push(
+      `MoCap sameSideRepeats=${mocap.bilateral.sameSideRepeats}`
+      + (mocap.bilateral.reliable === false
+        ? ' — bilateral.reliable=false; ห้ามใช้ meanStepTime / trueCadence'
+        : ' — event detection อาจพลาดฝั่งใดฝั่งหนึ่ง'),
+    );
   }
 
   let imu = reprocessImuTrace(imuTrace, options);
@@ -1109,7 +1354,19 @@ export function compareMocapToImu(mocap, imuTrace, options = {}) {
 
   const maxZuptDevG = options.maxZuptDevG ?? DEFAULT_MAX_ZUPT_DEV_G;
   const minAgreementPairs = options.minAgreementPairs ?? DEFAULT_MIN_AGREEMENT_PAIRS;
-  const explicitLag = Number.isFinite(options.align?.lagS);
+  // --lag / heel-tap = trusted; HS-circular จาก syncSession ต้องไม่นับ
+  const lagSourceHint = options.align?.lagSource;
+  const circularHsLag = lagSourceHint === 'hs-event-circular'
+    || lagSourceHint === 'hs-event-consensus';
+  const explicitLagRequested = Number.isFinite(options.align?.lagS);
+  const explicitLagTrustedIntent = explicitLagRequested
+    && options.align?.lagTrusted !== false
+    && !circularHsLag;
+  const explorationOnly = Boolean(
+    options.explorationOnly
+    || circularHsLag
+    || options.align?.lagTrusted === false,
+  );
 
   for (const flag of imu.qualityFlags || []) {
     if (flag.usedSyntheticTimestamps || flag.missingTimestampCount > 0) {
@@ -1163,23 +1420,58 @@ export function compareMocapToImu(mocap, imuTrace, options = {}) {
       && mocapSignals?.shankAngularVelocityDps?.length
       && imuGyro.ok
     ) {
+      const angleSource = mocapSignals.angleSource || 'legacy-ankle';
+      const envelopeOnly = angleSource === 'heel-for-envelope-only';
+      const signedOpts = { ...alignOpts };
+      delete signedOpts.lagS; // free scan — อย่าบังคับ lag จาก HS-circular ตอน xcorr
+      // heel-only: signed polarity มักพัง — ใช้ |ω| ตั้งแต่ต้น
       signalLag = estimateSignalLagS(
         mocapSignals.tS,
         mocapSignals.shankAngularVelocityDps,
         imuGyro.tS,
         imuGyro.gx,
-        alignOpts,
+        envelopeOnly ? { ...signedOpts, useEnvelope: true } : signedOpts,
       );
+      if (
+        !envelopeOnly
+        && !signalLag.ok
+        && (signalLag.reason === 'polarity-mismatch' || signalLag.reason === 'ambiguous-polarity')
+      ) {
+        const env = estimateSignalLagS(
+          mocapSignals.tS,
+          mocapSignals.shankAngularVelocityDps,
+          imuGyro.tS,
+          imuGyro.gx,
+          { ...signedOpts, useEnvelope: true },
+        );
+        if (env.ok) {
+          warnings.push(
+            `ขา ${side}: signed ω ${signalLag.reason} — fallback |ω| envelope `
+            + `lag=${env.lagS.toFixed(3)}s corr=${env.peakCorr?.toFixed?.(2)}; `
+            + 'ตรวจ malleolus map / ขั้วแกน (envelope ไม่แทน heel-tap lab sync)',
+          );
+          signalLag = env;
+        }
+      }
       if (signalLag.ok) {
-        alignOpts.lagS = signalLag.lagS;
-        alignOpts.lagSource = 'signal-xcorr';
-        alignOpts.coarseLagS = signalLag.coarseLagS;
+        // อย่าทับ --lag / hs-circular ที่ส่งมาแล้ว — ใช้ signal แค่ verify corr
+        if (!explicitLagRequested) {
+          alignOpts.lagS = signalLag.lagS;
+          alignOpts.lagSource = signalLag.useEnvelope ? 'signal-xcorr-envelope' : 'signal-xcorr';
+          alignOpts.coarseLagS = signalLag.coarseLagS;
+        }
         if (signalLag.periodAliasRisk) {
           warnings.push(
             `ขา ${side}: signal xcorr มี rival peaks ใกล้เคียงที่ ±n·stride `
             + `(${(signalLag.rivalPeaks || []).slice(0, 3).map((p) => `${p.lagS.toFixed(2)}s`).join(', ')}) `
             + `— เลือก lag=${signalLag.lagS.toFixed(3)}s จาก coarse=${Number.isFinite(signalLag.coarseLagS) ? signalLag.coarseLagS.toFixed(3) : '—'}s; `
             + 'HS timing อย่าเพิ่งเชื่อจนกว่าจะมี heel-tap/--lag; แนะนำ onset ยืน→เดินหรือ sync marker',
+          );
+        }
+        if (envelopeOnly) {
+          warnings.push(
+            `ขา ${side}: angleSource=heel-for-envelope-only — sync จาก |ω| ได้แต่ peak shank angle = null; `
+            + 'trial ถัดไปติด lateral malleolus เป็น AnkleForAngle',
           );
         }
       } else {
@@ -1231,17 +1523,33 @@ export function compareMocapToImu(mocap, imuTrace, options = {}) {
       );
     }
 
+    // --lag ที่ส่งมา: ต้องผ่าน signal corr บนหน้าต่างเลื่อน ถ้ามีสัญญาณให้ตรวจ
+    // (corr คำนวณไม่ได้ / อ่อน → syncTrusted=false — กัน heel-tap ใหญ่กว่า overlap เดิม)
+    const forcedLagCorrOk = !explicitLagTrustedIntent
+      || signalLag == null
+      || signalLag.ok === true;
+
+    // |ω| envelope = exploratory clock sync เท่านั้น (heel≠malleolus) — ไม่นับ lab-trusted
     const syncTrusted = Boolean(
-      explicitLag
-      || alignment.lagSource === 'signal-xcorr'
-      || (signalLag?.coarseFromOnset && alignment.lagOk !== false && Number.isFinite(alignment.lagS))
+      (explicitLagTrustedIntent && forcedLagCorrOk)
+      || (alignment.lagSource === 'signal-xcorr' && signalLag?.ok && !alignment.periodAliasRisk)
+      || (
+        signalLag?.coarseFromOnset
+        && alignment.lagOk !== false
+        && Number.isFinite(alignment.lagS)
+        && !alignment.periodAliasRisk
+        && alignment.lagSource !== 'signal-xcorr-envelope'
+      )
     );
     // session-mean หรือ pairing ปฏิเสธ → ห้าม comparable metrics (เคยทำให้ error% ดูสวยทั้งที่ผิด)
+    // periodAliasRisk = คลาด ±1 stride ได้ — ห้าม publish แม้จับคู่ exploratory ได้จาก coarse
     const usePairedAgreement = rawPaired
       && alignment.lagOk !== false
       && syncTrusted
+      && !alignment.periodAliasRisk
       && agreementPairs.length >= minAgreementPairs
-      && !hasSyntheticTimestamps;
+      && !hasSyntheticTimestamps
+      && !explorationOnly;
 
     if (alignment.lagOk === false && alignment.periodAliasRisk) {
       warnings.push(
@@ -1249,6 +1557,21 @@ export function compareMocapToImu(mocap, imuTrace, options = {}) {
         + `(เลือกได้ ${Number.isFinite(alignment.lagS) ? alignment.lagS.toFixed(3) : '—'}s แต่มี `
         + `${(alignment.rivalLags || []).slice(0, 3).map((r) => `${r.lagS.toFixed(2)}s`).join(', ') || 'rivals'}) `
         + '— ไม่จับคู่ cycle; ใส่ --lag / heel-tap ก่อนเทียบ — ห้ามใช้ session-mean เป็น validation',
+      );
+    } else if (alignment.periodAliasRisk && alignment.lagOk !== false) {
+      warnings.push(
+        `ขา ${side}: HS/signal lag มี period-alias rivals `
+        + `(เลือก ${Number.isFinite(alignment.lagS) ? alignment.lagS.toFixed(3) : '—'}s; rivals `
+        + `${(alignment.rivalLags || []).slice(0, 3).map((r) => `${r.lagS.toFixed(2)}s`).join(', ')
+          || (signalLag?.rivalPeaks || []).slice(0, 3).map((p) => `${p.lagS.toFixed(2)}s`).join(', ')
+          || '—'}) `
+        + '— จับคู่ได้แบบ exploratory แต่ comparable/validationPublishable=false',
+      );
+    } else if (explicitLagTrustedIntent && signalLag != null && !forcedLagCorrOk) {
+      warnings.push(
+        `ขา ${side}: --lag=${options.align.lagS.toFixed(3)}s แต่ signal corr ที่ lag นี้ใช้ไม่ได้ `
+        + `(${signalLag.reason || 'weak'}; peakCorr=${Number.isFinite(signalLag.peakCorr) ? signalLag.peakCorr.toFixed(2) : 'null'}) `
+        + '— syncTrusted=false; ตรวจ heel-tap / ช่วงทับซ้อนหลังเลื่อนเวลา',
       );
     } else if (!rawPaired && mocapCycles.length && imuCycles.length) {
       warnings.push(
@@ -1267,11 +1590,13 @@ export function compareMocapToImu(mocap, imuTrace, options = {}) {
         + `lag=${alignment.lagS.toFixed(2)}s via ${alignment.lagSource})`,
       );
     }
-    if (alignment.lagAmbiguous && alignment.lagOk !== false) {
-      warnings.push(
-        `ขา ${side}: มี lag หลายค่าที่ match เท่ากัน (${alignment.tiedLags.slice(0, 5).join(', ')}…) `
-        + '— เลือกจาก residual ต่ำสุดแล้ว แต่ควรตรวจ sync',
-      );
+    if ((alignment.lagAmbiguous || alignment.periodAliasRisk) && alignment.lagOk !== false) {
+      if (alignment.lagAmbiguous && !alignment.periodAliasRisk) {
+        warnings.push(
+          `ขา ${side}: มี lag หลายค่าที่ match เท่ากัน (${alignment.tiedLags.slice(0, 5).join(', ')}…) `
+          + '— เลือกจาก residual ต่ำสุดแล้ว แต่ควรตรวจ sync',
+        );
+      }
     }
 
     const pairedSummary = usePairedAgreement ? summarizePaired(agreementPairs) : null;
@@ -1321,6 +1646,9 @@ export function compareMocapToImu(mocap, imuTrace, options = {}) {
         agreementPairCount: agreementPairs.length,
         unpairedMocap: alignment.unpairedMocap,
         unpairedImu: alignment.unpairedImu,
+        // คู่ดิบสำหรับ UI / exploratory — แม้ syncTrusted=false ก็ยังดูตารางได้
+        pairs: alignment.pairs,
+        agreementPairs,
         timingMetricValid: Boolean(
           usePairedAgreement
           && alignment.timingMetricValid
@@ -1337,20 +1665,23 @@ export function compareMocapToImu(mocap, imuTrace, options = {}) {
   const presentSides = ['L', 'R'].filter((s) => sides[s]?.present);
   const publishableSides = presentSides.filter((s) => sides[s].validationPublishable);
   // session-level: อย่างน้อยหนึ่งข้าง publishable — อย่าให้ขาเดียวพังฆ่าทั้ง session
-  const validationPublishable = publishableSides.length > 0 && !hasSyntheticTimestamps;
+  const validationPublishable = publishableSides.length > 0 && !hasSyntheticTimestamps && !explorationOnly;
   const validationPublishableBilateral = presentSides.length > 0
     && presentSides.every((s) => sides[s].validationPublishable)
-    && !hasSyntheticTimestamps;
+    && !hasSyntheticTimestamps
+    && !explorationOnly;
 
   const labChecklist = [
     {
       id: 'heel-tap-or-lag',
-      ok: explicitLag || presentSides.some((s) => (
-        sides[s].alignment?.coarseFromOnset
-        || sides[s].alignment?.lagSource === 'signal-xcorr'
-        || sides[s].alignment?.lagSource === 'external'
-      )),
-      detail: 'heel-tap 1 ครั้งก่อนเดิน + ใส่ --lag หรือมี onset/signal sync ที่ผ่าน',
+      ok: (explicitLagTrustedIntent && presentSides.some((s) => sides[s].alignment?.syncTrusted))
+        || presentSides.some((s) => (
+          sides[s].alignment?.coarseFromOnset
+          || sides[s].alignment?.lagSource === 'signal-xcorr'
+          || (sides[s].alignment?.lagSource === 'external' && sides[s].alignment?.syncTrusted)
+        )),
+      // signal-xcorr-envelope ไม่นับ — |ω| จาก heel เป็น exploratory เท่านั้น
+      detail: 'heel-tap 1 ครั้งก่อนเดิน + ใส่ --lag หรือมี onset/signed signal sync ที่ผ่าน (ไม่นับ |ω| envelope)',
     },
     {
       id: 'paired-agreement-cycles',
@@ -1376,6 +1707,13 @@ export function compareMocapToImu(mocap, imuTrace, options = {}) {
     },
   ];
 
+  if (explorationOnly) {
+    warnings.unshift(
+      '🔭 explorationOnly=true — lag จาก HS-event circular / untrusted; '
+      + 'validationPublishable ถูกบังคับเป็น false (ไม่ใช่ lab gate)',
+    );
+  }
+
   if (!validationPublishable) {
     warnings.unshift(
       '⛔ validationPublishable=false — ไม่มีข้างใดผ่าน agreement ที่ trusted '
@@ -1390,26 +1728,70 @@ export function compareMocapToImu(mocap, imuTrace, options = {}) {
     );
   }
 
-  const mocapDistanceM = Number.isFinite(mocap?.session?.pelvisNetForwardDisplacementM)
+  const pelvisNetMeaningful = mocap?.session?.pelvisNetMeaningful === true
+    || mocap?.session?.forwardAxisMethod === 'net-start-end'
+    || mocap?.forwardAxis?.method === 'net-start-end';
+  const mocapDistanceM = pelvisNetMeaningful
+    && Number.isFinite(mocap?.session?.pelvisNetForwardDisplacementM)
     ? mocap.session.pelvisNetForwardDisplacementM
     : null;
+  const mocapMaxExcursionM = Number.isFinite(mocap?.session?.pelvisMaxExcursionM)
+    ? mocap.session.pelvisMaxExcursionM
+    : (Number.isFinite(mocap?.forwardAxis?.maxExcursionM) ? mocap.forwardAxis.maxExcursionM : null);
   const gtDistanceM = Number.isFinite(imuTrace?.groundTruth?.distanceM)
     ? imuTrace.groundTruth.distanceM
     : null;
 
+  if (!pelvisNetMeaningful && Number.isFinite(mocap?.session?.pelvisNetForwardDisplacementM)) {
+    warnings.push(
+      `vsMocapPelvisNetPct ถูกปิด — forwardAxis.method=`
+      + `${mocap?.session?.forwardAxisMethod || mocap?.forwardAxis?.method || '—'} `
+      + `(net ไม่มีความหมายบนเดินไป-กลับ; maxExcursion=`
+      + `${Number.isFinite(mocapMaxExcursionM) ? mocapMaxExcursionM.toFixed(2) : '—'}m)`,
+    );
+  }
+
   const distanceBySide = {};
   for (const side of ['L', 'R']) {
-    const n = (imu.bySide[side] || []).length;
-    const sumStride = (imu.bySide[side] || [])
-      .map((c) => c.strideLengthM)
-      .filter(Number.isFinite)
-      .reduce((a, b) => a + b, 0);
+    const cycles = imu.bySide[side] || [];
+    const closed = cycles.filter((c) => !c.isOpenStride);
+    const withLength = closed.filter((c) => Number.isFinite(c.strideLengthM));
+    const clean = withLength.filter((c) => isCleanStrideForDistance(c));
+    const sumAll = withLength.reduce((a, c) => a + c.strideLengthM, 0);
+    const sumClean = clean.reduce((a, c) => a + c.strideLengthM, 0);
+    const excludedCount = withLength.length - clean.length;
+    const n = closed.length;
+    const coverage = computeCycleTimeCoverage(closed);
+    // มีช่องว่างเวลาหลัง retract → Σclean ดูสะอาดแต่ขาดก้าว — ห้ามใช้เป็น distance gate
+    const distanceGateOk = n > 0 && !coverage.hasCoverageGap;
+    if (coverage.hasCoverageGap) {
+      warnings.push(
+        `ขา ${side}: coverage gap ${coverage.coverageGapS.toFixed(2)}s `
+        + `(ratio=${Number.isFinite(coverage.coverageRatio) ? coverage.coverageRatio.toFixed(2) : '—'}) `
+        + '— อาจขาด stride หลังแยก merged HS; distance gate ปฏิเสธ',
+      );
+    }
     distanceBySide[side] = {
-      imuSumStrideLengthM: n ? sumStride : null,
+      imuSumStrideLengthM: n ? sumAll : null,
+      imuSumStrideLengthCleanM: n ? sumClean : null,
+      excludedFromCleanCount: n ? excludedCount : null,
+      closedCycleCount: n || null,
+      cleanCycleCount: n ? clean.length : null,
+      coverageGapS: coverage.coverageGapS,
+      coverageRatio: coverage.coverageRatio,
+      hasCoverageGap: coverage.hasCoverageGap,
+      distanceGateOk,
       mocapMeanStrideLengthM: summarizeMocapSide(mocap?.perSide?.[side]).meanStrideLengthM,
-      // สำคัญ: ขาที่ไม่มี cycle ต้องเป็น null ไม่ใช่ pctError(0, gt)=−100%
-      vsMocapPelvisNetPct: n ? pctError(sumStride, mocapDistanceM) : null,
-      vsGroundTruthPct: n ? pctError(sumStride, gtDistanceM) : null,
+      // gate / publish ใช้ clean เท่านั้น — และต้องไม่มี coverage gap
+      vsMocapPelvisNetPct: (distanceGateOk && clean.length && mocapDistanceM != null)
+        ? pctError(sumClean, mocapDistanceM)
+        : null,
+      vsMocapPelvisMaxExcursionPct: (distanceGateOk && clean.length && mocapMaxExcursionM != null && mocapMaxExcursionM > 0.3)
+        ? pctError(sumClean, mocapMaxExcursionM)
+        : null,
+      vsGroundTruthPct: (distanceGateOk && clean.length && gtDistanceM != null)
+        ? pctError(sumClean, gtDistanceM)
+        : null,
     };
   }
 
@@ -1417,14 +1799,20 @@ export function compareMocapToImu(mocap, imuTrace, options = {}) {
     ok: true,
     imuSource: imu.source,
     warnings,
+    explorationOnly,
     validationPublishable,
     validationPublishableBilateral,
     labChecklist,
     sides,
     session: {
       mocapPelvisNetForwardM: mocapDistanceM,
+      mocapPelvisMaxExcursionM: mocapMaxExcursionM,
+      mocapPelvisNetMeaningful: pelvisNetMeaningful,
       mocapDurationS: mocap?.session?.durationS ?? null,
-      mocapTrueCadenceSpm: mocap?.bilateral?.trueCadenceSpm ?? null,
+      mocapTrueCadenceSpm: mocap?.bilateral?.reliable === false
+        ? null
+        : (mocap?.bilateral?.trueCadenceSpm ?? null),
+      mocapBilateralReliable: mocap?.bilateral?.reliable !== false,
       imuGroundTruthDistanceM: gtDistanceM,
       imuSampleCount: imuTrace?.sampleCount ?? (imuTrace?.samples?.length ?? null),
       imuCycleCountInFile: imuTrace?.cycleCount ?? (imuTrace?.cycles?.length ?? null),

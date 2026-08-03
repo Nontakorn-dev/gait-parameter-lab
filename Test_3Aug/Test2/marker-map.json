@@ -1,0 +1,9 @@
+{
+  "L_ASIS": 1,
+  "L_Knee": 2,
+  "L_AnkleForHS": 4,
+  "R_ASIS": 7,
+  "R_Knee": 8,
+  "R_AnkleForHS": 5,
+  "_note": "Test2: Heel เท่านั้น (M4=L Heel, M5=R Heel) — ลำดับ Heel ต่างจาก Test1. ไม่มี malleolus → AnkleForAngle ว่าง."
+}
