@@ -41,6 +41,8 @@ node mocap-analysis/compare.js mocap.gait-params.json path/to/imu-trace.json \
 
 `<SEC>` = เวลา IMU − MoCap จาก heel-tap (วัดจาก spike คู่เดียวกัน)
 
+`--lag` ถูกตรวจด้วย corr ที่ค่าที่ใส่มาเอง **และ** สแกนเพื่อนบ้าน ±k·stride (ปฏิเสธเมื่อมี peak ดีกว่าชัด) + เทียบกับ free-scan — ถ้า corr อ่อน / เป็น period alias / ไม่มี MoCap ω ให้ตรวจ → `syncTrusted=false` (fail-closed)
+
 ถ้า `validationPublishable` ไม่ใช่ `true` → **ทิ้ง trial นั้น** อย่าเอา error% ไปใส่เปเปอร์
 
 ## สิ่งที่เคลมในเปเปอร์ได้ / ไม่ได้

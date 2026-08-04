@@ -15,6 +15,7 @@ import {
   estimateSignalLagS,
   estimateSignalOnsetS,
   resolveOverlappingImuCycles,
+  extractImuGyroSeries,
 } from './compareImuTrace.js';
 
 function buildDemoTrace({ numStrides = 8, side = 'R', boardEpochMs = 5000, seed = 42 } = {}) {
@@ -193,9 +194,16 @@ test('🔴 compare mode: --lag → external-lag ไม่ใช่ hs-event-lag'
   const trace = buildDemoTrace({ numStrides: 6, side: 'R', seed: 7 });
   const imu = reprocessImuTrace(trace);
   const mocap = fakeMocapFromImuCycles(imu.bySide.R, 'R');
+  const gyro = extractImuGyroSeries(trace, 'R', {});
+  mocap.perSide.R.signals = {
+    tS: gyro.tS,
+    shankAngularVelocityDps: gyro.gx,
+    angleSource: 'legacy-ankle',
+  };
   const report = compareMocapToImu(mocap, trace, { align: { lagS: 0 }, minAgreementPairs: 1 });
   assert.equal(report.sides.R.alignment.lagSource, 'external');
   assert.equal(report.sides.R.alignment.mode, 'external-lag');
+  assert.equal(report.sides.R.alignment.syncTrusted, true);
 });
 
 test('compareMocapToImu: เมื่อ MoCap = IMU (synthetic smoke) + --lag → primary error ใกล้ 0', () => {
@@ -203,16 +211,44 @@ test('compareMocapToImu: เมื่อ MoCap = IMU (synthetic smoke) + --lag �
   const trace = buildDemoTrace({ numStrides: 6, side: 'R' });
   const imu = reprocessImuTrace(trace);
   const mocap = fakeMocapFromImuCycles(imu.bySide.R, 'R');
+  const gyro = extractImuGyroSeries(trace, 'R', {});
+  mocap.perSide.R.signals = {
+    tS: gyro.tS,
+    shankAngularVelocityDps: gyro.gx,
+    angleSource: 'legacy-ankle',
+  };
   const report = compareMocapToImu(mocap, trace, { align: { lagS: 0 }, minAgreementPairs: 1 });
 
   assert.equal(report.ok, true);
   const strideRow = report.sides.R.metrics.find((m) => m.metric === 'strideLengthM');
-  assert.ok(strideRow.comparable, 'ต้องมี --lag จึง comparable');
+  assert.ok(strideRow.comparable, 'ต้องมี --lag + signal verify จึง comparable');
   assert.ok(Math.abs(strideRow.errorPct) < 5, `errorPct=${strideRow.errorPct}`);
   const stanceRow = report.sides.R.metrics.find((m) => m.metric === 'stancePct');
   assert.equal(stanceRow.comparable, false, 'stance เป็น exploratory');
   const peakRow = report.sides.R.metrics.find((m) => m.metric === 'peakShankAngleDeg');
   assert.equal(peakRow.comparable, false, 'peak เป็น exploratory');
+});
+
+test('🔴 compareMocapToImu: --lag โดยไม่มี signals → syncTrusted=false (fail-closed)', () => {
+  const trace = buildDemoTrace({ numStrides: 6, side: 'R', seed: 19 });
+  const imu = reprocessImuTrace(trace);
+  const mocap = fakeMocapFromImuCycles(imu.bySide.R, 'R');
+  // cycles only — ไม่มี ω ให้ verify heel-tap
+  assert.equal(mocap.perSide.R.signals, undefined);
+
+  const report = compareMocapToImu(mocap, trace, {
+    align: { lagS: 0, lagSource: 'manual' },
+    minAgreementPairs: 1,
+  });
+  assert.equal(report.sides.R.alignment.forcedLagVerifiedBy, 'none');
+  assert.equal(report.sides.R.alignment.syncTrusted, false);
+  assert.equal(report.sides.R.validationPublishable, false);
+  const strideRow = report.sides.R.metrics.find((m) => m.metric === 'strideLengthM');
+  assert.equal(strideRow.comparable, false);
+  assert.ok(
+    report.warnings.some((w) => w.includes('ไม่มี MoCap signals') || w.includes('fail-closed')),
+    'ต้องเตือนว่า verify ไม่ได้',
+  );
 });
 
 test('compareMocapToImu: ไม่มี sync → comparable=false (fail-closed)', () => {
@@ -742,4 +778,173 @@ test('🔴 estimateSignalLagS: ไม่ Math.min-spread crash กับ series 
   assert.doesNotThrow(() => {
     estimateSignalLagS(t, y, t, y, { maxLagS: 0.4, rivalScanMaxLagS: 0.4, dtS: 0.02 });
   });
+});
+
+test('🔴 compareMocapToImu: --lag ตรวจ corr ที่ lag ผู้ใช้ ไม่ใช่ free-scan peak', () => {
+  const trace = buildDemoTrace({ numStrides: 8, side: 'R', seed: 33 });
+  const imu = reprocessImuTrace(trace);
+  const gyro = extractImuGyroSeries(trace, 'R', {});
+  assert.equal(gyro.ok, true);
+  const mocap = fakeMocapFromImuCycles(imu.bySide.R, 'R');
+  mocap.perSide.R.signals = {
+    tS: gyro.tS,
+    shankAngularVelocityDps: gyro.gx,
+    angleSource: 'legacy-ankle',
+  };
+
+  // --lag นอกช่วง: free scan อาจได้ corr สูงที่ ~0 แต่ forced ที่ 50s ต้องล้ม → syncTrusted=false
+  const bad = compareMocapToImu(mocap, trace, {
+    align: { lagS: 50.0, lagSource: 'manual', rivalScanMaxLagS: 5 },
+    minAgreementPairs: 1,
+  });
+  assert.equal(bad.sides.R.alignment.forcedLagVerifiedBy, 'signed');
+  assert.equal(bad.sides.R.alignment.syncTrusted, false, 'ห้าม trust --lag ที่ corr อ่อน/ไม่มี overlap');
+  assert.ok(
+    bad.sides.R.alignment.forcedLagCorrAtLag == null
+      || bad.sides.R.alignment.forcedLagCorrAtLag < 0.5,
+    `forced corr ต้องอ่อน ได้ ${bad.sides.R.alignment.forcedLagCorrAtLag}`,
+  );
+  // free-scan ที่ ~0 อาจยัง corr ดี — signalPeakCorr ต้องสะท้อน forced ไม่ใช่ free
+  if (
+    Number.isFinite(bad.sides.R.alignment.freeScanPeakCorr)
+    && bad.sides.R.alignment.freeScanPeakCorr >= 0.5
+  ) {
+    assert.ok(
+      bad.sides.R.alignment.signalPeakCorr == null
+        || bad.sides.R.alignment.signalPeakCorr < 0.5
+        || bad.sides.R.alignment.signalPeakCorr !== bad.sides.R.alignment.freeScanPeakCorr,
+      'signalPeakCorr ต้องมาจาก forced lag ไม่ใช่ free-scan peak',
+    );
+  }
+
+  const good = compareMocapToImu(mocap, trace, {
+    align: { lagS: 0, lagSource: 'manual', rivalScanMaxLagS: 5 },
+    minAgreementPairs: 1,
+  });
+  assert.equal(good.sides.R.alignment.syncTrusted, true);
+  assert.equal(good.sides.R.alignment.forcedLagVerifiedBy, 'signed');
+  assert.ok(
+    good.sides.R.alignment.forcedLagCorrAtLag >= 0.5,
+    `forced corr ที่ lag=0 ต้องดี ได้ ${good.sides.R.alignment.forcedLagCorrAtLag}`,
+  );
+});
+
+test('🔴 compareMocapToImu: --lag ถูก + rivalScan แคบยัง syncTrusted (ไม่พึ่ง free-scan)', () => {
+  const dt = 0.02;
+  const trueLag = 8.0;
+  const mocapN = Math.round(12 / dt);
+  const imuN = Math.round(25 / dt);
+  const mocapT = Array.from({ length: mocapN }, (_, i) => i * dt);
+  const imuT = Array.from({ length: imuN }, (_, i) => i * dt);
+  const mocapY = mocapT.map((x) => gaitLike(x, 1.1));
+  const imuY = imuT.map((x) => gaitLike(x - trueLag, 1.1));
+
+  // forced verify ตรง ๆ — ไม่สนว่า free scan ด้วย rivalScan=5 จะพลาด
+  const forced = estimateSignalLagS(mocapT, mocapY, imuT, imuY, {
+    lagS: trueLag,
+    dtS: dt,
+    rivalScanMaxLagS: 5,
+  });
+  assert.equal(forced.ok, true, `forced reason=${forced.reason} corr=${forced.peakCorr}`);
+
+  const freeNarrow = estimateSignalLagS(mocapT, mocapY, imuT, imuY, {
+    dtS: dt,
+    rivalScanMaxLagS: 5,
+  });
+  // free scan แคบมักพลาด lag 8s — นี่คือบั๊กเดิมถ้าเอา free.ok มาเป็น forcedLagCorrOk
+  assert.ok(
+    !freeNarrow.ok || Math.abs((freeNarrow.lagS ?? 0) - trueLag) > 0.5,
+    'fixture ต้องทำให้ free-scan แคบพลาด (ไม่งั้นเทสต์ไม่จับ regression)',
+  );
+});
+
+test('🔴 compareMocapToImu: --lag คลาด ±n·stride ห้าม publish (แม้ corr สูง / error% สวย)', () => {
+  const stride = 1.05;
+  const trace = buildDemoTrace({ numStrides: 8, side: 'R', seed: 42 });
+  const imu = reprocessImuTrace(trace);
+  const gyro = extractImuGyroSeries(trace, 'R', {});
+  assert.equal(gyro.ok, true);
+  const closed = (imu.bySide.R || []).filter((c) => !c.isOpenStride);
+  assert.ok(closed.length >= 4, `ได้ ${closed.length} closed`);
+  const mocap = fakeMocapFromImuCycles(closed, 'R');
+  mocap.perSide.R.signals = {
+    tS: gyro.tS,
+    shankAngularVelocityDps: gyro.gx,
+    angleSource: 'legacy-ankle',
+  };
+
+  const good = compareMocapToImu(mocap, trace, {
+    align: { lagS: 0, lagSource: 'manual' },
+    minAgreementPairs: 1,
+  });
+  assert.equal(good.sides.R.alignment.syncTrusted, true, 'lag=0 ต้อง trusted');
+  assert.equal(good.sides.R.validationPublishable, true, 'lag=0 ต้อง publishable');
+  assert.equal(good.sides.R.alignment.periodAliasRisk, false, 'gate alias ต้อง false เมื่อ --lag ถูก');
+  assert.equal(good.sides.R.alignment.freeBeatsForced, false);
+
+  for (const lag of [stride, -stride, 2 * stride]) {
+    const bad = compareMocapToImu(mocap, trace, {
+      align: { lagS: lag, lagSource: 'manual' },
+      minAgreementPairs: 1,
+    });
+    const a = bad.sides.R.alignment;
+    const strideRow = bad.sides.R.metrics.find((m) => m.metric === 'strideLengthM');
+    assert.equal(a.syncTrusted, false, `--lag=${lag} ต้องไม่ trusted (corr=${a.forcedLagCorrAtLag})`);
+    assert.equal(bad.sides.R.validationPublishable, false, `--lag=${lag} ห้าม publish`);
+    assert.equal(strideRow.comparable, false, `--lag=${lag} ห้าม comparable`);
+    assert.ok(
+      a.periodAliasRisk || a.freeBeatsForced || (a.forcedLagCorrAtLag != null && a.forcedLagCorrAtLag < 0.5),
+      `--lag=${lag}: ต้องมี alias/freeBeats หรือ corr อ่อน ได้ alias=${a.periodAliasRisk} freeBeats=${a.freeBeatsForced}`,
+    );
+  }
+
+  // คลาดน้อยกว่า 1 stride — จับด้วย weak corr
+  const off = compareMocapToImu(mocap, trace, {
+    align: { lagS: 0.30, lagSource: 'manual' },
+    minAgreementPairs: 1,
+  });
+  assert.equal(off.sides.R.alignment.syncTrusted, false);
+  assert.equal(off.sides.R.validationPublishable, false);
+});
+
+test('🔴 estimateSignalLagS: forced --lag ที่เป็น period alias → ok=false', () => {
+  const dt = 0.02;
+  const stride = 1.05;
+  const n = Math.round(12 / dt);
+  const t = Array.from({ length: n }, (_, i) => i * dt);
+  const y = t.map((tt) => gaitLike(tt, stride));
+  const at0 = estimateSignalLagS(t, y, t, y, { lagS: 0, dtS: dt, stridePeriodS: stride });
+  assert.equal(at0.ok, true, `lag=0 reason=${at0.reason}`);
+  assert.equal(at0.periodAliasRisk, false);
+
+  const at1 = estimateSignalLagS(t, y, t, y, { lagS: stride, dtS: dt, stridePeriodS: stride });
+  assert.equal(at1.ok, false, `lag=+T ต้องไม่ ok corr=${at1.peakCorr}`);
+  assert.equal(at1.reason, 'period-alias-rivals');
+  assert.equal(at1.periodAliasRisk, true);
+  assert.ok(at1.rivalPeaks.some((p) => Math.abs(p.lagS) < 0.05 && p.corr > at1.peakCorr));
+});
+
+test('🔴 compareMocapToImu: pairs ในรายงานไม่ฝัง cycle object เต็ม', () => {
+  const trace = buildDemoTrace({ numStrides: 6, side: 'R', seed: 7 });
+  const imu = reprocessImuTrace(trace);
+  const mocap = fakeMocapFromImuCycles(imu.bySide.R, 'R');
+  const gyro = extractImuGyroSeries(trace, 'R', {});
+  mocap.perSide.R.signals = {
+    tS: gyro.tS,
+    shankAngularVelocityDps: gyro.gx,
+    angleSource: 'legacy-ankle',
+  };
+  const report = compareMocapToImu(mocap, trace, { align: { lagS: 0 }, minAgreementPairs: 1 });
+  const pairs = report.sides.R.alignment.pairs;
+  assert.ok(pairs.length > 0);
+  for (const p of pairs) {
+    assert.ok(Number.isInteger(p.mocapIndex) || p.mocapIndex === 0);
+    assert.ok(Number.isInteger(p.imuIndex) || p.imuIndex === 0);
+    assert.equal(Object.keys(p.mocap).includes('hsStartTimeS'), true);
+    assert.equal(Object.keys(p.imu).includes('cycleStartTimeS'), true);
+    // ห้ามฝัง sample arrays / diagnostics ก้อนใหญ่
+    assert.equal(p.mocap.samples, undefined);
+    assert.equal(p.imu.samples, undefined);
+    assert.equal(p.imu.newCycleDiagnostics, undefined);
+  }
 });

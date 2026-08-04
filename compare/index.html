@@ -7,87 +7,117 @@
   <link rel="stylesheet" href="style.css" />
 </head>
 <body>
-  <header class="top">
-    <div class="top__brand">
-      <p class="top__eyebrow">Gait Parameter Lab</p>
-      <h1>Gait Compare</h1>
-      <p class="top__sub">ดูค่า gait ทุกตัวที่คำนวณได้ · กราฟ ω เช็ครูปร่าง · คุณภาพเป็นแค่ note</p>
+  <header class="header">
+    <div class="header__brand">
+      <span class="header__dot"></span>
+      <div>
+        <h1>Gait Compare</h1>
+        <p>อัปโหลด MoCap CSV + IMU trace แล้วเทียบ gait parameter · sync ด้วย ω · คุณภาพเป็น note</p>
+      </div>
     </div>
-    <nav class="top__nav">
-      <a href="/">Dashboard</a>
-      <a href="/validate/">Validate</a>
-      <a href="/debug/">Swing</a>
-    </nav>
+    <div class="header__actions">
+      <a class="btn" href="/">← Main</a>
+      <a class="btn" href="/validate/">Validate Trace</a>
+      <a class="btn" href="/debug/">Swing Test</a>
+    </div>
   </header>
 
-  <main class="shell">
-    <section class="panel upload">
-      <div class="drop" id="csvDrop" tabindex="0">
-        <input type="file" id="csvInput" accept=".csv,text/csv" hidden />
-        <span class="drop__tag">1</span>
-        <div>
-          <strong>MoCap CSV</strong>
-          <p>OptiTrack Motive export</p>
+  <main class="main-container">
+    <section class="upload-panel">
+      <div class="upload-grid">
+        <div class="upload-slot" id="csvDrop" tabindex="0">
+          <input type="file" id="csvInput" accept=".csv,text/csv" hidden />
+          <div class="upload-slot__status">
+            <span class="upload-slot__badge">1</span>
+            <div>
+              <div class="upload-slot__title">MoCap CSV</div>
+              <div class="upload-slot__hint">OptiTrack Motive export (row-typed) — ต้องมี marker ASIS / เข่า / ส้นเท้า</div>
+            </div>
+          </div>
+          <div class="upload-slot__file" id="csvName">ยังไม่เลือกไฟล์</div>
         </div>
-        <span class="drop__file" id="csvName">ยังไม่เลือก</span>
-      </div>
-      <div class="drop" id="jsonDrop" tabindex="0">
-        <input type="file" id="jsonInput" accept=".json,application/json" hidden />
-        <span class="drop__tag">2</span>
-        <div>
-          <strong>IMU Trace JSON</strong>
-          <p>จาก Dashboard → Export</p>
+
+        <div class="upload-slot" id="jsonDrop" tabindex="0">
+          <input type="file" id="jsonInput" accept=".json,application/json" hidden />
+          <div class="upload-slot__status">
+            <span class="upload-slot__badge">2</span>
+            <div>
+              <div class="upload-slot__title">IMU Trace JSON</div>
+              <div class="upload-slot__hint">ไฟล์ <code>gait-trace-*.json</code> จาก Dashboard → Export Trace</div>
+            </div>
+          </div>
+          <div class="upload-slot__file" id="jsonName">ยังไม่เลือกไฟล์</div>
         </div>
-        <span class="drop__file" id="jsonName">ยังไม่เลือก</span>
       </div>
+      <p class="upload-panel__note">
+        คลิกหรือลากไฟล์วางในช่องได้ · ทั้งสองไฟล์ประมวลผลในเบราว์เซอร์ ไม่ส่งขึ้นเซิร์ฟเวอร์
+      </p>
     </section>
 
-    <section class="panel map" id="mapPanel">
-      <div class="panel__head">
-        <h2>แมป Marker 1–8</h2>
-        <p>เลือกตำแหน่งแบบที่เรียกในแลป — ต้องครบ สะโพก / เข่า / ส้นเท้า ซ้าย-ขวา</p>
+    <section class="card" id="mapPanel">
+      <div class="card-header">
+        <div>
+          <div class="card-title">แมป Marker</div>
+          <div class="card-subtitle">
+            เลือกตำแหน่งตามที่เรียกในแลป — ต้องครบ ASIS / เข่า ซ้าย-ขวา และส้นเท้า (หรือข้อเท้า) ทั้งสองข้าง
+          </div>
+        </div>
       </div>
+
       <div class="presets">
-        <button type="button" class="chip" data-preset="test1">Test1 (ตาม position.md)</button>
-        <button type="button" class="chip" data-preset="test2">Test2 (Heel สลับ L/R)</button>
-        <button type="button" class="chip" data-preset="clear">ล้าง</button>
+        <button type="button" class="btn" data-preset="test1">Preset Test1</button>
+        <button type="button" class="btn" data-preset="test2">Preset Test2 (Heel สลับ L/R)</button>
+        <button type="button" class="btn" data-preset="clear">ล้างทั้งหมด</button>
       </div>
+
       <div class="map-grid" id="mapGrid"></div>
       <p class="map-status" id="mapStatus">อัปโหลด CSV เพื่อเห็น marker จริงในไฟล์</p>
     </section>
 
-    <section class="panel controls">
-      <label>
-        ขา
-        <select id="sideSelect">
-          <option value="L">L</option>
-          <option value="R">R</option>
-        </select>
-      </label>
-      <label>
-        แกน IMU (กราฟ)
-        <select id="axisSelect">
-          <option value="gx">gx (หลัก)</option>
-          <option value="gy">gy</option>
-          <option value="gz">gz</option>
-        </select>
-      </label>
-      <label class="check">
-        <input type="checkbox" id="envelopeCheck" checked />
-        |ω| envelope
-      </label>
-      <button type="button" class="primary" id="runBtn" disabled>คำนวณ &amp; เทียบ</button>
-      <span class="run-hint" id="runHint">อัปโหลดครบ + แมปครบก่อน</span>
+    <section class="card">
+      <div class="card-header">
+        <div>
+          <div class="card-title">ตั้งค่าการเทียบ</div>
+          <div class="card-subtitle">เปลี่ยนขา / แกน แล้วกดคำนวณใหม่ได้ทุกเมื่อ</div>
+        </div>
+      </div>
+      <div class="controls">
+        <div class="control-group">
+          <label class="control-label" for="sideSelect">ขา</label>
+          <select id="sideSelect">
+            <option value="L">L — ซ้าย</option>
+            <option value="R">R — ขวา</option>
+          </select>
+        </div>
+        <div class="control-group">
+          <label class="control-label" for="axisSelect">แกน IMU (กราฟ)</label>
+          <select id="axisSelect">
+            <option value="gx">gx (sagittal)</option>
+            <option value="gy">gy</option>
+            <option value="gz">gz</option>
+          </select>
+        </div>
+        <label class="check">
+          <input type="checkbox" id="envelopeCheck" checked />
+          |ω| envelope
+        </label>
+        <button type="button" class="btn primary" id="runBtn" disabled>คำนวณ &amp; เทียบ</button>
+        <span class="run-hint" id="runHint">อัปโหลดครบ + แมปครบก่อน</span>
+      </div>
     </section>
 
-    <section class="panel report hidden" id="reportPanel">
-      <div class="panel__head">
-        <h2>Gait parameters</h2>
-        <p id="paramMeta">ค่าเฉลี่ยต่อข้าง + รายก้าว — ดูตัวเลขที่คำนวณได้ทั้งหมด</p>
+    <section class="card hidden" id="reportPanel">
+      <div class="card-header">
+        <div>
+          <div class="card-title">Gait parameters</div>
+          <div class="card-subtitle" id="paramMeta">ค่าเฉลี่ยต่อข้าง + รายก้าว</div>
+        </div>
       </div>
+
       <div class="stat-row" id="statRow"></div>
-      <div class="table-wrap" style="margin-top:0.75rem">
-        <table id="paramTable">
+
+      <div class="table-wrap">
+        <table class="data-table" id="paramTable">
           <thead>
             <tr>
               <th>พารามิเตอร์</th>
@@ -101,9 +131,12 @@
         </table>
       </div>
 
-      <h3 class="subhead">รายก้าวที่จับคู่ได้ (หลัง sync เวลา)</h3>
+      <h3 class="subhead">
+        รายก้าวที่จับคู่ได้
+        <span class="subhead__note">หลัง sync เวลา · จับคู่ภายใน ±0.4 s</span>
+      </h3>
       <div class="table-wrap">
-        <table id="strideTable">
+        <table class="data-table" id="strideTable">
           <thead>
             <tr>
               <th>#</th>
@@ -122,10 +155,13 @@
         </table>
       </div>
 
-      <h3 class="subhead">ทุก cycle ที่คำนวณได้ (ไม่ต้องจับคู่)</h3>
+      <h3 class="subhead">
+        ทุก cycle ที่คำนวณได้
+        <span class="subhead__note">ไม่ต้องจับคู่ — ดูค่าดิบต่อข้าง</span>
+      </h3>
       <div class="cycle-grid">
         <div class="table-wrap">
-          <table id="mocapCycleTable">
+          <table class="data-table" id="mocapCycleTable">
             <thead>
               <tr><th colspan="6">MoCap</th></tr>
               <tr>
@@ -136,7 +172,7 @@
           </table>
         </div>
         <div class="table-wrap">
-          <table id="imuCycleTable">
+          <table class="data-table" id="imuCycleTable">
             <thead>
               <tr><th colspan="6">IMU</th></tr>
               <tr>
@@ -148,22 +184,30 @@
         </div>
       </div>
 
-      <details class="notes" id="notesDetails">
-        <summary>Notes / warnings (คุณภาพ · ไม่บล็อกการดูค่า)</summary>
-        <div class="warn-list" id="warnList"></div>
+      <details class="notes">
+        <summary>Notes / warnings — คุณภาพและ sync (ไม่บล็อกการดูค่า)</summary>
+        <ul class="warn-list" id="warnList"></ul>
       </details>
     </section>
 
-    <section class="panel chart-panel hidden" id="chartPanel">
-      <div class="panel__head row">
+    <section class="card hidden" id="chartPanel">
+      <div class="card-header">
         <div>
-          <h2>กราฟ ω (เช็ครูปร่าง)</h2>
-          <p id="syncMeta">—</p>
+          <div class="card-title">กราฟ ω — เช็ครูปร่าง</div>
+          <div class="card-subtitle" id="syncMeta">—</div>
+        </div>
+        <div class="chart-legend">
+          <span class="chart-legend__item"><span class="chart-legend__swatch mocap"></span>MoCap</span>
+          <span class="chart-legend__item"><span class="chart-legend__swatch imu"></span>IMU</span>
         </div>
       </div>
       <div class="chart-wrap">
         <canvas id="omegaChart"></canvas>
       </div>
+      <p class="chart-hint">
+        แกนเวลาเป็นเวลา MoCap (IMU ถูกเลื่อนด้วย lag แล้ว) · normalize เมื่อสเกลสองสัญญาณต่างกันมาก —
+        ใช้ดูว่าจังหวะก้าวตรงกันไหม ไม่ใช่ใช้วัดขนาด
+      </p>
     </section>
   </main>
 

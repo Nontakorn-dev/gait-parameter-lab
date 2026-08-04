@@ -26,10 +26,61 @@ const COMPARE_KEYS = [
 const DEFAULT_MATCH_TOLERANCE_S = 0.40;
 // หน้าต่างละเอียดรอบ coarse lag (sync แล็บมัก < 0.5s หลัง onset align)
 const DEFAULT_FINE_MAX_LAG_S = 0.4;
-// สแกนกว้างเพื่อจับ rival peaks ที่ ±n·stride — จำกัดแค่ fine window = การันตี alias เงียบ
-const DEFAULT_RIVAL_SCAN_MAX_LAG_S = 5;
+// สแกนกว้างเพื่อจับ rival peaks / clock offset — ค่าเดิม 5s ทำให้ --lag / free-scan พังเมื่อ offset แล็บ >5s
+const DEFAULT_RIVAL_SCAN_MAX_LAG_S = 90;
+const MAX_AUTO_RIVAL_SCAN_LAG_S = 120;
 // backward-compat: maxLagS เดิมชี้ fine window; rival scan แยก
 const DEFAULT_MAX_LAG_S = DEFAULT_FINE_MAX_LAG_S;
+
+/** rival scan: ถ้าไม่ระบุ → อย่างน้อย DEFAULT และไม่เกินช่วงสัญญาณ (cap) */
+function resolveRivalScanMaxLagS(options, mocapT, imuT) {
+  if (Number.isFinite(options.rivalScanMaxLagS)) return options.rivalScanMaxLagS;
+  const mocapSpan = maxFinite(mocapT) - minFinite(mocapT);
+  const imuSpan = maxFinite(imuT) - minFinite(imuT);
+  const span = Math.min(
+    Number.isFinite(mocapSpan) ? mocapSpan : Infinity,
+    Number.isFinite(imuSpan) ? imuSpan : Infinity,
+  );
+  if (!Number.isFinite(span) || span <= 0) return DEFAULT_RIVAL_SCAN_MAX_LAG_S;
+  return Math.min(Math.max(span, DEFAULT_RIVAL_SCAN_MAX_LAG_S), MAX_AUTO_RIVAL_SCAN_LAG_S);
+}
+
+/** คู่ในรายงาน — เก็บ index/เวลา + ฟิลด์ที่ใช้เทียบ ไม่ฝัง cycle object เต็ม */
+function slimPairForReport(p) {
+  const m = p.mocap || {};
+  const i = p.imu || {};
+  return {
+    mocapIndex: p.mocapIndex ?? null,
+    imuIndex: p.imuIndex ?? null,
+    mocapTimeS: p.mocapTimeS,
+    imuTimeS: p.imuTimeS,
+    alignedImuTimeS: p.alignedImuTimeS,
+    timeErrorS: p.timeErrorS,
+    mocap: {
+      hsStartTimeS: m.hsStartTimeS ?? m.cycleStartTimeS ?? null,
+      strideLengthM: m.strideLengthM ?? null,
+      cadenceSpm: m.cadenceSpm ?? null,
+      walkingSpeedMps: m.walkingSpeedMps ?? null,
+      stancePct: m.stancePct ?? null,
+      peakShankAngleDeg: m.peakShankAngleDeg ?? null,
+    },
+    imu: {
+      cycleStartTimeS: i.cycleStartTimeS ?? null,
+      strideLengthM: i.strideLengthM ?? null,
+      cadenceSpm: i.cadenceSpm ?? null,
+      walkingSpeedMps: i.walkingSpeedMps ?? null,
+      stancePct: i.stancePct ?? null,
+      peakShankAngleDeg: i.peakShankAngleDeg ?? null,
+      isOpenStride: Boolean(i.isOpenStride),
+      strideLengthClamped: Boolean(i.strideLengthClamped),
+      strideLengthUntrusted: Boolean(i.strideLengthUntrusted),
+      suspectedMissedHs: Boolean(i.suspectedMissedHs),
+      zuptAccelDeviationG: i.zuptAccelDeviationG
+        ?? i.zuptCheck?.zuptAccelDeviationG
+        ?? null,
+    },
+  };
+}
 const DEFAULT_XCORR_DT_S = 0.005;
 const DEFAULT_MIN_PEAK_CORR = 0.5;
 const AMBIGUOUS_PEAK_RATIO = 0.95;
@@ -795,7 +846,7 @@ function listLocalMaxima(corrByLag, minCorr) {
  */
 export function estimateSignalLagS(mocapT, mocapY, imuT, imuY, options = {}) {
   const fineMaxLagS = options.fineMaxLagS ?? options.maxLagS ?? DEFAULT_FINE_MAX_LAG_S;
-  const rivalScanMaxLagS = options.rivalScanMaxLagS ?? DEFAULT_RIVAL_SCAN_MAX_LAG_S;
+  const rivalScanMaxLagS = resolveRivalScanMaxLagS(options, mocapT, imuT);
   const dt = options.dtS ?? DEFAULT_XCORR_DT_S;
   const minPeakCorr = options.minPeakCorr ?? DEFAULT_MIN_PEAK_CORR;
   const polarityMargin = options.polarityPeakMargin ?? POLARITY_PEAK_MARGIN;
@@ -872,28 +923,51 @@ export function estimateSignalLagS(mocapT, mocapY, imuT, imuY, options = {}) {
 
   const maxScanSamples = Math.max(1, Math.floor(rivalScanMaxLagS / dt));
 
-  // Forced lag (จาก --lag / heel-tap sync) — ตรวจ corr บนหน้าต่างเลื่อน ไม่ใช่ overlap ดิบ
+  // Forced lag (จาก --lag / heel-tap sync) — ตรวจ corr + สแกน ±k·stride กัน period alias
   if (Number.isFinite(options.lagS)) {
     const corr = nccAtLagS(options.lagS);
-    const ok = Number.isFinite(corr) && corr >= minPeakCorr;
+    const stridePeriodS = options.stridePeriodS ?? options.medianStrideTimeS ?? null;
+    const rivalPeaks = [];
+    let periodAliasRisk = false;
+    if (Number.isFinite(corr) && Number.isFinite(stridePeriodS) && stridePeriodS >= 0.4 && stridePeriodS <= 2.5) {
+      for (const k of [-2, -1, 1, 2]) {
+        const lag = options.lagS + k * stridePeriodS;
+        const c = nccAtLagS(lag);
+        if (!Number.isFinite(c)) continue;
+        if (c >= corr * AMBIGUOUS_PEAK_RATIO) {
+          rivalPeaks.push({
+            lagS: lag,
+            corr: c,
+            deltaFromChosenS: k * stridePeriodS,
+          });
+        }
+      }
+      // เพื่อนบ้านดีกว่าชัด = --lag เป็น alias ไม่ใช่ peak จริง (อย่าใช้ ≥0.95·corr อย่างเดียว
+      // — ที่ lag ถูก เพื่อนบ้าน ±T มักมี corr สูงใกล้เคียงอยู่แล้ว)
+      periodAliasRisk = rivalPeaks.some((r) => r.corr > corr + 1e-9);
+    }
     let reason = null;
+    const corrOk = Number.isFinite(corr) && corr >= minPeakCorr;
+    const ok = corrOk && !periodAliasRisk;
     if (!Number.isFinite(corr)) reason = 'overlap-too-short-at-lag';
-    else if (!ok) reason = 'weak-correlation';
+    else if (periodAliasRisk) reason = 'period-alias-rivals';
+    else if (!corrOk) reason = 'weak-correlation';
     return {
       lagS: options.lagS,
       peakCorr: corr,
       peakCorrMinus: corr == null ? null : -corr,
       polarity: 1,
       ok,
-      ambiguous: false,
+      ambiguous: rivalPeaks.length > 0,
       polarityIndeterminate: false,
-      periodAliasRisk: false,
-      rivalPeaks: [],
+      periodAliasRisk,
+      rivalPeaks,
       coarseLagS: options.lagS,
       coarseFromOnset: false,
       useEnvelope,
       reason,
       systematicUncertaintyS: SIGNAL_LAG_SYSTEMATIC_UNCERTAINTY_S,
+      stridePeriodS: Number.isFinite(stridePeriodS) ? stridePeriodS : null,
     };
   }
 
@@ -1219,6 +1293,8 @@ export function pairCyclesByTime(mocapCycles, imuCycles, options = {}) {
     pairs.push({
       mocap: m.c,
       imu: best.im.c,
+      mocapIndex: m.index,
+      imuIndex: best.im.index,
       mocapTimeS: m.t,
       imuTimeS: best.im.t,
       alignedImuTimeS: best.alignedImuT,
@@ -1415,35 +1491,63 @@ export function compareMocapToImu(mocap, imuTrace, options = {}) {
     const mocapSignals = mocap?.perSide?.[side]?.signals;
     const imuGyro = extractImuGyroSeries(imuTrace, side, options);
     let signalLag = null;
-    if (
+    /** @type {ReturnType<typeof estimateSignalLagS>|null} */
+    let forcedLagCheck = null;
+    let forcedLagVerifiedBy = 'none';
+    /** @type {ReturnType<typeof estimateSignalLagS>|null} */
+    let lagAtAlignmentCheck = null;
+    const angleSource = mocapSignals?.angleSource || 'legacy-ankle';
+    const envelopeOnly = angleSource === 'heel-for-envelope-only';
+    const hasSignalSeries = Boolean(
       mocapSignals?.tS?.length
       && mocapSignals?.shankAngularVelocityDps?.length
       && imuGyro.ok
-    ) {
-      const angleSource = mocapSignals.angleSource || 'legacy-ankle';
-      const envelopeOnly = angleSource === 'heel-for-envelope-only';
-      const signedOpts = { ...alignOpts };
-      delete signedOpts.lagS; // free scan — อย่าบังคับ lag จาก HS-circular ตอน xcorr
-      // heel-only: signed polarity มักพัง — ใช้ |ω| ตั้งแต่ต้น
+    );
+    const stridePeriodS = median([
+      ...mocapCycles.map((c) => c.strideTimeS),
+      ...imuCycles.map((c) => c.strideTimeS),
+    ].filter(Number.isFinite));
+    const mT = hasSignalSeries ? mocapSignals.tS : null;
+    const mY = hasSignalSeries ? mocapSignals.shankAngularVelocityDps : null;
+    const iT = hasSignalSeries ? imuGyro.tS : null;
+    const iY = hasSignalSeries ? imuGyro.gx : null;
+
+    if (hasSignalSeries) {
+      const scanBase = {
+        ...alignOpts,
+        rivalScanMaxLagS: resolveRivalScanMaxLagS(alignOpts, mT, iT),
+        stridePeriodS: Number.isFinite(stridePeriodS) ? stridePeriodS : undefined,
+      };
+
+      // verify: corr ที่ --lag ผู้ใช้ (คง lagS ไว้) + สแกน ±k·stride กัน alias
+      if (Number.isFinite(alignOpts.lagS)) {
+        const verifyEnvelope = envelopeOnly
+          || alignOpts.useEnvelope === true
+          || alignOpts.lagSource === 'signal-xcorr-envelope';
+        forcedLagCheck = estimateSignalLagS(mT, mY, iT, iY, {
+          ...scanBase,
+          lagS: alignOpts.lagS,
+          useEnvelope: verifyEnvelope,
+        });
+        forcedLagVerifiedBy = verifyEnvelope ? 'envelope' : 'signed';
+      }
+
+      // free scan — หา lag จากสัญญาณ (เตือนเมื่อต่างจาก --lag / ใช้เมื่อไม่มี --lag)
+      const freeOpts = { ...scanBase };
+      delete freeOpts.lagS;
       signalLag = estimateSignalLagS(
-        mocapSignals.tS,
-        mocapSignals.shankAngularVelocityDps,
-        imuGyro.tS,
-        imuGyro.gx,
-        envelopeOnly ? { ...signedOpts, useEnvelope: true } : signedOpts,
+        mT,
+        mY,
+        iT,
+        iY,
+        envelopeOnly ? { ...freeOpts, useEnvelope: true } : freeOpts,
       );
       if (
         !envelopeOnly
         && !signalLag.ok
         && (signalLag.reason === 'polarity-mismatch' || signalLag.reason === 'ambiguous-polarity')
       ) {
-        const env = estimateSignalLagS(
-          mocapSignals.tS,
-          mocapSignals.shankAngularVelocityDps,
-          imuGyro.tS,
-          imuGyro.gx,
-          { ...signedOpts, useEnvelope: true },
-        );
+        const env = estimateSignalLagS(mT, mY, iT, iY, { ...freeOpts, useEnvelope: true });
         if (env.ok) {
           warnings.push(
             `ขา ${side}: signed ω ${signalLag.reason} — fallback |ω| envelope `
@@ -1459,6 +1563,17 @@ export function compareMocapToImu(mocap, imuTrace, options = {}) {
           alignOpts.lagS = signalLag.lagS;
           alignOpts.lagSource = signalLag.useEnvelope ? 'signal-xcorr-envelope' : 'signal-xcorr';
           alignOpts.coarseLagS = signalLag.coarseLagS;
+        } else {
+          const fineMax = alignOpts.fineMaxLagS ?? DEFAULT_FINE_MAX_LAG_S;
+          if (Math.abs(signalLag.lagS - alignOpts.lagS) > fineMax) {
+            warnings.push(
+              `ขา ${side}: free-scan lag=${signalLag.lagS.toFixed(3)}s ต่างจาก --lag=`
+              + `${alignOpts.lagS.toFixed(3)}s เกิน ±${fineMax}s `
+              + `(free corr=${Number.isFinite(signalLag.peakCorr) ? signalLag.peakCorr.toFixed(3) : '—'}; `
+              + `forced corr=${Number.isFinite(forcedLagCheck?.peakCorr) ? forcedLagCheck.peakCorr.toFixed(3) : '—'}) `
+              + '— ตรวจ heel-tap / ค่า --lag',
+            );
+          }
         }
         if (signalLag.periodAliasRisk) {
           warnings.push(
@@ -1523,30 +1638,80 @@ export function compareMocapToImu(mocap, imuTrace, options = {}) {
       );
     }
 
-    // --lag ที่ส่งมา: ต้องผ่าน signal corr บนหน้าต่างเลื่อน ถ้ามีสัญญาณให้ตรวจ
-    // (corr คำนวณไม่ได้ / อ่อน → syncTrusted=false — กัน heel-tap ใหญ่กว่า overlap เดิม)
-    const forcedLagCorrOk = !explicitLagTrustedIntent
-      || signalLag == null
-      || signalLag.ok === true;
+    // ทุกเส้นทางที่ trust sync ต้องยืนยันด้วย signal corr ที่ lag สุดท้าย (onset/HS ไม่ยกเว้น)
+    if (
+      hasSignalSeries
+      && Number.isFinite(alignment.lagS)
+      && !explicitLagTrustedIntent
+    ) {
+      const verifyEnvelope = envelopeOnly
+        || alignOpts.useEnvelope === true
+        || alignment.lagSource === 'signal-xcorr-envelope'
+        || signalLag?.useEnvelope === true;
+      lagAtAlignmentCheck = estimateSignalLagS(mT, mY, iT, iY, {
+        lagS: alignment.lagS,
+        useEnvelope: verifyEnvelope,
+        stridePeriodS: Number.isFinite(stridePeriodS) ? stridePeriodS : undefined,
+        rivalScanMaxLagS: resolveRivalScanMaxLagS(alignOpts, mT, iT),
+      });
+    }
 
-    // |ω| envelope = exploratory clock sync เท่านั้น (heel≠malleolus) — ไม่นับ lab-trusted
-    const syncTrusted = Boolean(
-      (explicitLagTrustedIntent && forcedLagCorrOk)
-      || (alignment.lagSource === 'signal-xcorr' && signalLag?.ok && !alignment.periodAliasRisk)
-      || (
-        signalLag?.coarseFromOnset
-        && alignment.lagOk !== false
-        && Number.isFinite(alignment.lagS)
-        && !alignment.periodAliasRisk
-        && alignment.lagSource !== 'signal-xcorr-envelope'
-      )
+    const fineMax = alignOpts.fineMaxLagS ?? DEFAULT_FINE_MAX_LAG_S;
+    // free scan ที่ดีกว่า/เท่ากันแต่คนละที่ = --lag เป็น period alias
+    const freeBeatsForced = Boolean(
+      explicitLagTrustedIntent
+      && Number.isFinite(alignOpts.lagS)
+      && signalLag?.ok
+      && Number.isFinite(signalLag.lagS)
+      && Math.abs(signalLag.lagS - alignOpts.lagS) > fineMax
+      && Number.isFinite(signalLag.peakCorr)
+      && signalLag.peakCorr >= (forcedLagCheck?.peakCorr ?? -Infinity) - 1e-9
     );
-    // session-mean หรือ pairing ปฏิเสธ → ห้าม comparable metrics (เคยทำให้ error% ดูสวยทั้งที่ผิด)
-    // periodAliasRisk = คลาด ±1 stride ได้ — ห้าม publish แม้จับคู่ exploratory ได้จาก coarse
+
+    // --lag: ต้องผ่าน forced corr + ไม่ถูก free/lattice แย่ง (ไม่มีสัญญาณ = ห้าม trust)
+    const forcedLagCorrOk = !explicitLagTrustedIntent
+      || (
+        forcedLagCheck != null
+        && forcedLagCheck.ok === true
+        && !forcedLagCheck.periodAliasRisk
+        && !freeBeatsForced
+      );
+
+    // alias ที่บล็อก agreement — อย่าใช้ free-scan rivals มาฆ่า --lag ที่ verify แล้วถูกต้อง
+    // (periodic gait มักมี peak ที่ ±T เสมอ แม้ heel-tap ถูก)
+    const aliasRisk = explicitLagTrustedIntent
+      ? Boolean(forcedLagCheck?.periodAliasRisk || freeBeatsForced || alignment.periodAliasRisk)
+      : Boolean(
+        signalLag?.periodAliasRisk
+        || alignment.periodAliasRisk
+        || (lagAtAlignmentCheck != null && (
+          !lagAtAlignmentCheck.ok || lagAtAlignmentCheck.periodAliasRisk
+        ))
+      );
+
+    // มี --lag ที่ trusted → ด่าน forced (+ freeBeats / lattice)
+    // |ω| envelope = exploratory — ไม่นับ lab-trusted ผ่าน signal-xcorr-envelope
+    const syncTrusted = Boolean(
+      explicitLagTrustedIntent
+        ? forcedLagCorrOk
+        : (
+          (alignment.lagSource === 'signal-xcorr' && signalLag?.ok && !aliasRisk)
+          || (
+            signalLag?.coarseFromOnset
+            && alignment.lagOk !== false
+            && Number.isFinite(alignment.lagS)
+            && alignment.lagSource !== 'signal-xcorr-envelope'
+            && lagAtAlignmentCheck?.ok === true
+            && !lagAtAlignmentCheck.periodAliasRisk
+            && !aliasRisk
+          )
+        )
+    );
+    // session-mean หรือ pairing ปฏิเสธ → ห้าม comparable metrics
     const usePairedAgreement = rawPaired
       && alignment.lagOk !== false
       && syncTrusted
-      && !alignment.periodAliasRisk
+      && !aliasRisk
       && agreementPairs.length >= minAgreementPairs
       && !hasSyntheticTimestamps
       && !explorationOnly;
@@ -1567,11 +1732,23 @@ export function compareMocapToImu(mocap, imuTrace, options = {}) {
           || '—'}) `
         + '— จับคู่ได้แบบ exploratory แต่ comparable/validationPublishable=false',
       );
-    } else if (explicitLagTrustedIntent && signalLag != null && !forcedLagCorrOk) {
+    } else if (explicitLagTrustedIntent && forcedLagCheck == null) {
       warnings.push(
-        `ขา ${side}: --lag=${options.align.lagS.toFixed(3)}s แต่ signal corr ที่ lag นี้ใช้ไม่ได้ `
-        + `(${signalLag.reason || 'weak'}; peakCorr=${Number.isFinite(signalLag.peakCorr) ? signalLag.peakCorr.toFixed(2) : 'null'}) `
-        + '— syncTrusted=false; ตรวจ heel-tap / ช่วงทับซ้อนหลังเลื่อนเวลา',
+        `ขา ${side}: --lag=${options.align.lagS.toFixed(3)}s แต่ไม่มี MoCap signals/IMU gyro ให้ตรวจ corr `
+        + '— syncTrusted=false (fail-closed; อย่า trust heel-tap โดยไม่ verify)',
+      );
+    } else if (explicitLagTrustedIntent && forcedLagCheck != null && !forcedLagCorrOk) {
+      const why = freeBeatsForced
+        ? `free-scan ที่ ${signalLag.lagS.toFixed(3)}s corr=${signalLag.peakCorr.toFixed(3)} `
+          + `ดีกว่า/เท่า --lag (forced corr=${Number.isFinite(forcedLagCheck.peakCorr) ? forcedLagCheck.peakCorr.toFixed(3) : 'null'})`
+        : forcedLagCheck.periodAliasRisk
+          ? `period-alias rivals ที่ ±n·stride `
+            + `(${(forcedLagCheck.rivalPeaks || []).slice(0, 3).map((p) => `${p.lagS.toFixed(2)}s@${p.corr.toFixed(3)}`).join(', ')})`
+          : `${forcedLagCheck.reason || 'weak'}; peakCorr=${Number.isFinite(forcedLagCheck.peakCorr) ? forcedLagCheck.peakCorr.toFixed(2) : 'null'}; `
+            + `verifiedBy=${forcedLagVerifiedBy}`;
+      warnings.push(
+        `ขา ${side}: --lag=${options.align.lagS.toFixed(3)}s ไม่ผ่าน verification (${why}) `
+        + '— syncTrusted=false; ตรวจ heel-tap / ค่า --lag',
       );
     } else if (!rawPaired && mocapCycles.length && imuCycles.length) {
       warnings.push(
@@ -1638,24 +1815,34 @@ export function compareMocapToImu(mocap, imuTrace, options = {}) {
         syncTrusted,
         coarseLagS: alignment.coarseLagS ?? signalLag?.coarseLagS ?? null,
         coarseFromOnset: Boolean(signalLag?.coarseFromOnset),
-        signalPeakCorr: signalLag?.ok ? signalLag.peakCorr : null,
-        peakCorrMinus: signalLag?.peakCorrMinus ?? null,
+        // เมื่อมี --lag โชว์ corr ที่ lag ผู้ใช้; ไม่เช่นนั้นโชว์ free-scan peak
+        signalPeakCorr: forcedLagCheck != null
+          ? forcedLagCheck.peakCorr
+          : (signalLag?.ok ? signalLag.peakCorr : null),
+        forcedLagVerifiedBy,
+        forcedLagCorrAtLag: forcedLagCheck != null ? forcedLagCheck.peakCorr : null,
+        freeBeatsForced,
+        freeScanLagS: signalLag?.ok ? signalLag.lagS : null,
+        freeScanPeakCorr: signalLag?.ok ? signalLag.peakCorr : null,
+        freeScanPeriodAliasRisk: Boolean(signalLag?.periodAliasRisk),
+        lagAtAlignmentCorr: lagAtAlignmentCheck != null ? lagAtAlignmentCheck.peakCorr : null,
+        peakCorrMinus: (forcedLagCheck ?? lagAtAlignmentCheck ?? signalLag)?.peakCorrMinus ?? null,
         polarityIndeterminate: signalLag?.polarityIndeterminate ?? false,
         systematicUncertaintyS: signalLag?.systematicUncertaintyS ?? null,
         pairedCount: alignment.pairs.length,
         agreementPairCount: agreementPairs.length,
         unpairedMocap: alignment.unpairedMocap,
         unpairedImu: alignment.unpairedImu,
-        // คู่ดิบสำหรับ UI / exploratory — แม้ syncTrusted=false ก็ยังดูตารางได้
-        pairs: alignment.pairs,
-        agreementPairs,
+        // คู่สำหรับ UI / CLI — index/เวลา + ฟิลด์เทียบ ไม่ฝัง cycle เต็ม
+        pairs: alignment.pairs.map(slimPairForReport),
+        agreementPairs: agreementPairs.map(slimPairForReport),
         timingMetricValid: Boolean(
           usePairedAgreement
           && alignment.timingMetricValid
-          && !signalLag?.periodAliasRisk
-          && !alignment.periodAliasRisk
+          && !aliasRisk
         ),
-        periodAliasRisk: Boolean(signalLag?.periodAliasRisk || alignment.periodAliasRisk),
+        // ค่าที่ gate ใช้จริง (ไม่ใช่แค่ free-scan rivals ที่ periodic gait มีเสมอ)
+        periodAliasRisk: aliasRisk,
         meanTimeErrorS: alignment.meanTimeErrorS,
         medianTimeErrorS: alignment.medianTimeErrorS,
       },

@@ -8,7 +8,7 @@
 //   --out <report.json>
 //   --lag <seconds>          บังคับ sync lag (IMU−MoCap) จาก heel-tap — จำเป็นสำหรับ --lab
 //   --fine-lag <seconds>     หน้าต่างละเอียดรอบ coarse (default 0.4)
-//   --rival-scan <seconds>   สแกนหา period-alias rivals (default 5)
+//   --rival-scan <seconds>   สแกนหา period-alias rivals (default: max(90, ช่วงสัญญาณ) ≤120)
 //   --max-lag <seconds>      alias ของ --fine-lag (backward compatible)
 //   --lab                    fail (exit 1) ถ้า validationPublishable=false
 

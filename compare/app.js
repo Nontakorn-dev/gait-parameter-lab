@@ -14,21 +14,23 @@ import {
   summarizeImuSide,
   reprocessImuTrace,
 } from '../mocap-analysis/compareImuTrace.js';
+import { minFinite, maxFinite } from '../src/util/finiteStats.js';
 
+// label สั้นพอให้อ่านได้ใน select แคบ ๆ (ชื่อกายวิภาคเต็มอยู่ใน position.md / markerRoles.js)
 const ROLE_OPTIONS = [
   { value: '', label: '— ไม่ใช้ —' },
-  { value: 'L_ASIS', label: 'สะโพกซ้าย (Left ASIS)' },
-  { value: 'R_ASIS', label: 'สะโพกขวา (Right ASIS)' },
-  { value: 'L_Knee', label: 'เข่าซ้าย (Left Lateral Femoral Epicondyle)' },
-  { value: 'R_Knee', label: 'เข่าขวา (Right Lateral Femoral Epicondyle)' },
-  { value: 'L_AnkleForHS', label: 'ส้นเท้าซ้าย (Left Heel / Calcaneus)' },
-  { value: 'R_AnkleForHS', label: 'ส้นเท้าขวา (Right Heel / Calcaneus)' },
-  { value: 'L_Toe', label: 'ปลายเท้าซ้าย (Left Toe / 2nd Metatarsal)' },
-  { value: 'R_Toe', label: 'ปลายเท้าขวา (Right Toe / 2nd Metatarsal)' },
-  { value: 'L_AnkleForAngle', label: 'ข้อเท้าซ้าย — malleolus (สำหรับมุม)' },
-  { value: 'R_AnkleForAngle', label: 'ข้อเท้าขวา — malleolus (สำหรับมุม)' },
-  { value: 'L_Ankle', label: 'ข้อเท้าซ้าย (legacy Ankle)' },
-  { value: 'R_Ankle', label: 'ข้อเท้าขวา (legacy Ankle)' },
+  { value: 'L_ASIS', label: 'สะโพกซ้าย · L ASIS' },
+  { value: 'R_ASIS', label: 'สะโพกขวา · R ASIS' },
+  { value: 'L_Knee', label: 'เข่าซ้าย · L Knee' },
+  { value: 'R_Knee', label: 'เข่าขวา · R Knee' },
+  { value: 'L_AnkleForHS', label: 'ส้นเท้าซ้าย · L Heel' },
+  { value: 'R_AnkleForHS', label: 'ส้นเท้าขวา · R Heel' },
+  { value: 'L_Toe', label: 'ปลายเท้าซ้าย · L Toe' },
+  { value: 'R_Toe', label: 'ปลายเท้าขวา · R Toe' },
+  { value: 'L_AnkleForAngle', label: 'ข้อเท้าซ้าย · L Malleolus (มุม)' },
+  { value: 'R_AnkleForAngle', label: 'ข้อเท้าขวา · R Malleolus (มุม)' },
+  { value: 'L_Ankle', label: 'ข้อเท้าซ้าย · L Ankle (legacy)' },
+  { value: 'R_Ankle', label: 'ข้อเท้าขวา · R Ankle (legacy)' },
 ];
 
 const PRESETS = {
@@ -46,6 +48,39 @@ const PRESETS = {
 };
 
 const REQUIRED_ROLES = ['L_ASIS', 'R_ASIS', 'L_Knee', 'R_Knee'];
+
+// ต้องตรงกับ --mocap / --imu ใน style.css (legend ใน header ใช้สีเดียวกัน)
+const CHART_COLOR = {
+  mocap: '#1565c0',
+  imu: '#e65100',
+  grid: '#eeeeee',
+  tick: '#757575',
+  title: '#9e9e9e',
+};
+const CHART_FONT = { family: "Inter, -apple-system, 'Segoe UI', sans-serif", size: 11 };
+
+function escapeHtml(value) {
+  return String(value ?? '')
+    .replace(/&/g, '&amp;')
+    .replace(/</g, '&lt;')
+    .replace(/>/g, '&gt;')
+    .replace(/"/g, '&quot;')
+    .replace(/'/g, '&#39;');
+}
+
+function maxAbsFinite(values) {
+  let max = 0;
+  let found = false;
+  for (const v of values) {
+    if (!Number.isFinite(v)) continue;
+    const a = Math.abs(v);
+    if (!found || a > max) {
+      max = a;
+      found = true;
+    }
+  }
+  return found ? max : 0;
+}
 
 const els = {
   csvDrop: document.getElementById('csvDrop'),
@@ -146,13 +181,14 @@ function renderMapGrid() {
   els.mapGrid.innerHTML = ids.map((id) => {
     const marker = state.markers.find((m) => m.id === id);
     const label = marker?.name ? `#${id} ${marker.name}` : `#${id}`;
+    const safeLabel = escapeHtml(label);
     const current = state.roleByMarkerId[id] ?? '';
     const opts = ROLE_OPTIONS.map((o) => (
-      `<option value="${o.value}" ${o.value === current ? 'selected' : ''}>${o.label}</option>`
+      `<option value="${o.value}" ${o.value === current ? 'selected' : ''}>${escapeHtml(o.label)}</option>`
     )).join('');
     return `
       <label class="map-row">
-        <span class="map-row__id" title="${label}">${label}</span>
+        <span class="map-row__id" title="${safeLabel}">${safeLabel}</span>
         <select data-marker-id="${id}">${opts}</select>
       </label>`;
   }).join('');
@@ -204,18 +240,20 @@ async function onCsvFile(file) {
   state.csvText = text;
   state.csvName = file.name;
   els.csvName.textContent = file.name;
-  els.csvDrop.classList.add('is-ready');
   try {
     state.parsed = parseOptiTrackCsv(text);
     state.markers = listMarkers(state.parsed);
   } catch (err) {
+    // parse ไม่ผ่าน → อย่าให้ช่องดู "พร้อม" (is-ready เป็นสีเขียว)
     state.parsed = null;
     state.markers = [];
+    els.csvDrop.classList.remove('is-ready');
     els.mapStatus.className = 'map-status bad';
     els.mapStatus.textContent = `parse CSV ไม่ได้: ${err.message}`;
     updateReady();
     return;
   }
+  els.csvDrop.classList.add('is-ready');
   renderMapGrid();
 }
 
@@ -257,10 +295,11 @@ function buildAlignedSeries(mocapT, mocapY, imuT, imuY, lagS, useEnvelope, { nor
   const mY = useEnvelope ? mocapY.map((v) => (Number.isFinite(v) ? Math.abs(v) : v)) : mocapY;
   const iY = useEnvelope ? imuY.map((v) => (Number.isFinite(v) ? Math.abs(v) : v)) : imuY;
 
-  const mocapT0 = Math.min(...mocapT.filter(Number.isFinite));
-  const mocapT1 = Math.max(...mocapT.filter(Number.isFinite));
-  const imuT0 = Math.min(...imuT.filter(Number.isFinite));
-  const imuT1 = Math.max(...imuT.filter(Number.isFinite));
+  const mocapT0 = minFinite(mocapT);
+  const mocapT1 = maxFinite(mocapT);
+  const imuT0 = minFinite(imuT);
+  const imuT1 = maxFinite(imuT);
+  if (![mocapT0, mocapT1, imuT0, imuT1].every(Number.isFinite)) return null;
 
   const o0 = Math.max(mocapT0, imuT0 - lagS);
   const o1 = Math.min(mocapT1, imuT1 - lagS);
@@ -284,8 +323,8 @@ function buildAlignedSeries(mocapT, mocapY, imuT, imuY, lagS, useEnvelope, { nor
   let plotM = mocapOut;
   let plotI = imuOut;
   let yLabel = useEnvelope ? '|ω| (deg/s)' : 'ω (deg/s)';
-  let peakMocap = Math.max(...mocapOut.map(Math.abs));
-  let peakImu = Math.max(...imuOut.map(Math.abs));
+  let peakMocap = maxAbsFinite(mocapOut);
+  let peakImu = maxAbsFinite(imuOut);
   if (normalize && peakMocap > 0 && peakImu > 0) {
     // เทียบรูปร่างอย่างเดียว — heel ω กับ IMU gx สเกลคนละระดับ (~10×)
     plotM = mocapOut.map((v) => v / peakMocap);
@@ -316,7 +355,7 @@ function renderChart(series, side, axis, useEnvelope) {
         {
           label: `MoCap ω${useEnvelope ? ' |·|' : ''} (${side})${series.normalized ? ' · norm' : ''}`,
           data: series.mocap,
-          borderColor: '#1d4e89',
+          borderColor: CHART_COLOR.mocap,
           backgroundColor: 'transparent',
           borderWidth: 1.5,
           pointRadius: 0,
@@ -325,7 +364,7 @@ function renderChart(series, side, axis, useEnvelope) {
         {
           label: `IMU ${axis}${useEnvelope ? ' |·|' : ''} (${side})${series.normalized ? ' · norm' : ''}`,
           data: series.imu,
-          borderColor: '#c45c26',
+          borderColor: CHART_COLOR.imu,
           backgroundColor: 'transparent',
           borderWidth: 1.5,
           pointRadius: 0,
@@ -340,8 +379,17 @@ function renderChart(series, side, axis, useEnvelope) {
       parsing: false,
       interaction: { mode: 'nearest', intersect: false, axis: 'x' },
       plugins: {
-        legend: { position: 'top', labels: { boxWidth: 12 } },
+        // legend อยู่ใน card header (static, สีตรงกับ --mocap/--imu) และโหมด envelope/norm
+        // แสดงใน #syncMeta อยู่แล้ว — ปิดของ Chart.js กันซ้ำซ้อน
+        legend: { display: false },
         tooltip: {
+          backgroundColor: 'rgba(33,33,33,0.92)',
+          titleFont: CHART_FONT,
+          bodyFont: CHART_FONT,
+          padding: 10,
+          displayColors: true,
+          boxWidth: 8,
+          boxHeight: 8,
           callbacks: {
             title: (items) => `t = ${fmt(items[0]?.parsed?.x, 2)} s (MoCap)`,
           },
@@ -350,11 +398,21 @@ function renderChart(series, side, axis, useEnvelope) {
       scales: {
         x: {
           type: 'linear',
-          title: { display: true, text: 'เวลา MoCap (s)' },
-          ticks: { maxTicksLimit: 10 },
+          title: { display: true, text: 'เวลา MoCap (s)', color: CHART_COLOR.title, font: CHART_FONT },
+          ticks: { maxTicksLimit: 10, color: CHART_COLOR.tick, font: CHART_FONT },
+          grid: { color: CHART_COLOR.grid, drawTicks: false },
+          border: { display: false },
         },
         y: {
-          title: { display: true, text: series.yLabel || (useEnvelope ? '|ω| (deg/s)' : 'ω (deg/s)') },
+          title: {
+            display: true,
+            text: series.yLabel || (useEnvelope ? '|ω| (deg/s)' : 'ω (deg/s)'),
+            color: CHART_COLOR.title,
+            font: CHART_FONT,
+          },
+          ticks: { color: CHART_COLOR.tick, font: CHART_FONT },
+          grid: { color: CHART_COLOR.grid, drawTicks: false },
+          border: { display: false },
         },
       },
     },
@@ -477,19 +535,23 @@ function renderReport(report, side, lagInfo, extra = {}) {
   if (imuBody) {
     imuBody.innerHTML = imuCycles.length
       ? imuCycles.map((c, idx) => {
+        // flag เป็น badge (ภาษาเดียวกับ card-badge หน้าอื่น) — อ่านง่ายกว่าสตริงคอมมา
         const flags = [
-          c.isOpenStride ? 'open' : null,
-          c.strideLengthClamped ? 'clamp' : null,
-          c.suspectedMissedHs ? 'missHS' : null,
-          c.strideLengthUntrusted ? 'untrusted' : null,
-        ].filter(Boolean).join(',') || '—';
+          c.isOpenStride ? ['open', 'neutral'] : null,
+          c.strideLengthClamped ? ['clamp', 'warn'] : null,
+          c.suspectedMissedHs ? ['missHS', 'bad'] : null,
+          c.strideLengthUntrusted ? ['untrusted', 'bad'] : null,
+        ].filter(Boolean);
+        const flagHtml = flags.length
+          ? flags.map(([t, cls]) => `<span class="flag flag--${cls}">${t}</span>`).join('')
+          : '<span class="flag flag--ok">ok</span>';
         return `<tr>
           <td>${idx + 1}</td>
           <td class="mono">${fmt(c.cycleStartTimeS, 2)}</td>
           <td class="mono">${fmt(c.strideLengthM, 3)}</td>
           <td class="mono">${fmt(c.cadenceSpm, 1)}</td>
           <td class="mono">${fmt(c.stancePct, 1)}</td>
-          <td class="mono">${flags}</td>
+          <td class="flags">${flagHtml}</td>
         </tr>`;
       }).join('')
       : '<tr><td colspan="6">ไม่มี cycle</td></tr>';
@@ -516,7 +578,7 @@ function renderReport(report, side, lagInfo, extra = {}) {
   for (const w of (report.warnings || []).slice(0, 5)) {
     notes.push(w);
   }
-  els.warnList.innerHTML = notes.map((n) => `<li>${n}</li>`).join('');
+  els.warnList.innerHTML = notes.map((n) => `<li>${escapeHtml(n)}</li>`).join('');
 
   els.reportPanel.classList.remove('hidden');
 }
@@ -524,6 +586,13 @@ function renderReport(report, side, lagInfo, extra = {}) {
 async function runCompare() {
   els.runBtn.disabled = true;
   els.runHint.textContent = 'กำลังคำนวณ…';
+  // ซ่อนผลชุดเก่าทันที — กันอ่านเลขผิดขา/ไฟล์เมื่อรอบนี้ error
+  els.chartPanel.classList.add('hidden');
+  els.reportPanel.classList.add('hidden');
+  if (state.chart) {
+    state.chart.destroy();
+    state.chart = null;
+  }
 
   try {
     const overrideMap = buildMapFromRoles();
@@ -584,6 +653,7 @@ async function runCompare() {
         lagS: signalLag.lagS,
         lagSource: useEnvelope ? 'signal-xcorr-envelope' : 'signal-xcorr',
         lagTrusted: false,
+        useEnvelope,
         fineMaxLagS: 0.4,
         rivalScanMaxLagS: 90,
       },
